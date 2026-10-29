@@ -7,6 +7,11 @@ import { configure, getCampId, getSnapshot, getTotalBoard, getTrackBoard } from 
 import { toCsv } from '../api/_csv.mjs';
 
 const TTL_SECONDS = 12;
+// 过期后先给旧数据、后台再刷（stale-while-revalidate）：上游一次抓全量要 3~11 秒，
+// 直接等会以为页面卡死。只要还在这段时间内，访问者永远秒回。
+const STALE_SECONDS = 300;
+// Durable Object 里的上游轮询周期：有浏览器连着才轮询
+const PUSH_INTERVAL_MS = 15000;
 
 const isForce = (url) => url.searchParams.get('force') === '1' || url.searchParams.get('refresh') === '1';
 
@@ -32,6 +37,16 @@ function cacheKeyFor(request, extra = '') {
   return new Request(`${u.origin}${u.pathname}${extra}${qs ? '?' + qs : ''}`, { method: 'GET' });
 }
 
+function storeCache(data) {
+  return new Response(JSON.stringify(data), {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'x-data-at': String(Date.now()),
+      'Cache-Control': `public, max-age=${TTL_SECONDS}`,
+    },
+  });
+}
+
 async function cachedJson(request, ctx, loader, extraKey = '') {
   const force = isForce(new URL(request.url));
   const cache = caches.default;
@@ -45,16 +60,30 @@ async function cachedJson(request, ctx, loader, extraKey = '') {
       if (age < TTL_SECONDS) {
         return json(JSON.parse(await hit.text()), 200, { 'X-Cache': 'HIT', 'X-Data-Age': String(age) });
       }
+      if (age < STALE_SECONDS) {
+        // 过期但还新鲜：立刻回旧数据，后台刷新边缘缓存
+        ctx.waitUntil(
+          (async () => {
+            try {
+              const data = await loader();
+              await cache.put(key, storeCache(data));
+            } catch {
+              /* 后台刷新失败就用旧数据顶着 */
+            }
+          })(),
+        );
+        return json(JSON.parse(await hit.text()), 200, {
+          'X-Cache': 'STALE',
+          'X-Data-Age': String(age),
+          'Cache-Control': 'no-store',
+        });
+      }
     }
   }
 
   const data = await loader();
-  const body = JSON.stringify(data);
-  const stored = new Response(body, {
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'x-data-at': String(Date.now()), 'Cache-Control': `public, max-age=${TTL_SECONDS}` },
-  });
-  ctx.waitUntil(cache.put(key, stored));
-  return json(JSON.parse(body), 200, { 'X-Cache': force ? 'BYPASS' : 'MISS' });
+  ctx.waitUntil(cache.put(key, storeCache(data)));
+  return json(data, 200, { 'X-Cache': force ? 'BYPASS' : 'MISS' });
 }
 
 // 赛道榜没有学校/导师，用总榜 userId 关联补齐（与本地 server.mjs 口径一致）
@@ -68,6 +97,86 @@ async function enrichWithTotal(rows) {
   });
 }
 
+
+// WebSocket 帧不做 HTTP 压缩，975KB 的 JSON 每 15 秒推一次太费流量 → 这里手动 gzip
+async function gzipJson(text) {
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
+  return await new Response(stream).arrayBuffer();
+}
+
+// ------------------------------------------------------------------ 推送中枢
+// Durable Object：有浏览器连着时，每 15 秒抓一次上游，抓到就 push 给所有连接，
+// 浏览器不用自己轮询（轮询只在推送连不上时兜底）。
+export class BoardHub {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.sockets = new Set();
+    this.snapshot = null;
+    this.ready = state.blockConcurrencyWhile(async () => {
+      this.snapshot = (await state.storage.get('snapshot')) || null;
+    });
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === '/api/stream') return this.stream(request);
+    await this.ready;
+    return json(this.snapshot ? { ...this.snapshot, push: { intervalMs: PUSH_INTERVAL_MS, clients: this.sockets.size } } : { pending: true }, 200, {
+      'Cache-Control': 'no-store',
+    });
+  }
+
+  async stream(request) {
+    if (request.headers.get('Upgrade') !== 'websocket') {
+      return json({ error: 'expected websocket' }, 426);
+    }
+    await this.ready;
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    server.accept();
+    this.sockets.add(server);
+    const drop = () => this.sockets.delete(server);
+    server.addEventListener('close', drop);
+    server.addEventListener('error', drop);
+    if (this.snapshot) {
+      try {
+        server.send(await gzipJson(JSON.stringify(this.snapshot)));
+      } catch {
+        /* 忽略单连接失败 */
+      }
+    }
+    await this.arm();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async arm() {
+    const cur = await this.state.storage.getAlarm();
+    if (cur == null) await this.state.storage.setAlarm(Date.now() + 300);
+  }
+
+  async alarm() {
+    // 没人连就不轮询，省 CPU / 上游请求
+    if (this.sockets.size === 0) return;
+    try {
+      const snap = await getSnapshot({ force: true });
+      this.snapshot = snap;
+      await this.state.storage.put('snapshot', snap);
+      const body = await gzipJson(JSON.stringify(snap));
+      for (const ws of this.sockets) {
+        try {
+          ws.send(body);
+        } catch {
+          this.sockets.delete(ws);
+        }
+      }
+    } catch {
+      /* 上游失败：连着的浏览器继续看上一版 */
+    }
+    if (this.sockets.size > 0) await this.state.storage.setAlarm(Date.now() + PUSH_INTERVAL_MS);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     if (env?.CAMP_ID != null) configure({ campId: env.CAMP_ID });
@@ -77,10 +186,42 @@ export default {
     const p = url.pathname;
 
     if (p === '/api/health') {
-      return json({ ok: true, campId: getCampId(), cacheTtlMs: TTL_SECONDS * 1000, at: new Date().toISOString(), runtime: 'cloudflare-worker' });
+      let gz = null;
+      try {
+        gz = (await gzipJson('x'.repeat(4096))).byteLength;
+      } catch (e) {
+        gz = 'error: ' + (e.message || e);
+      }
+      return json({
+        ok: true,
+        campId: getCampId(),
+        cacheTtlMs: TTL_SECONDS * 1000,
+        at: new Date().toISOString(),
+        runtime: 'cloudflare-worker',
+        push: { intervalMs: PUSH_INTERVAL_MS, compression: typeof CompressionStream, gzip4096: gz },
+      });
     }
 
     try {
+      if ((p === '/api/stream' || p === '/api/latest') && env?.BOARD_HUB) {
+        const hub = env.BOARD_HUB.get(env.BOARD_HUB.idFromName('camp21'));
+        return hub.fetch(request);
+      }
+
+      if (p === '/api/snapshot' && env?.BOARD_HUB) {
+        // 推送中枢手里已经有最新快照就直接用，避免同一份数据抓两遍
+        try {
+          const hub = env.BOARD_HUB.get(env.BOARD_HUB.idFromName('camp21'));
+          const res = await hub.fetch(new Request('https://hub/api/latest'));
+          const body = await res.json();
+          if (body && Array.isArray(body.boards)) {
+            return json(body, 200, { 'X-Source': 'durable-object', 'Cache-Control': 'no-store' });
+          }
+        } catch {
+          /* 退回直连上游 */
+        }
+      }
+
       if (p === '/api/snapshot') {
         const force = isForce(url);
         return await cachedJson(request, ctx, () => getSnapshot({ force }));

@@ -20,6 +20,8 @@ const state = {
   changedKeys: new Set(), // keys that moved on the latest update (for flash)
   drawerRow: null,
   apiBase: '', // 实时 API 的 origin（同源为空串，GitHub Pages 形态下是 Worker 域名）
+  streaming: false, // WebSocket 推送是否连上
+  streamRetries: 0,
   metric: 'avg', // 耗时曲线口径：avg | median | p90
   timingOpen: false, // 耗时曲线默认折叠，避免占满首屏
   mode: null, // 'live'（本地 node 服务）| 'static'（GitHub Pages 静态快照）
@@ -64,32 +66,45 @@ function diffMap(snap) {
 //   2) 远程 Worker（https://board.fireflydle.games/api/*，带 CORS）——GitHub Pages 形态靠它拿实时数据
 //   3) 构建时生成的 data/snapshot.json（CI 每 10 分钟刷新，兜底）
 const LIVE_ORIGIN = 'https://board.fireflydle.games';
-async function fetchSnapshot(force) {
-  // GitHub Pages 形态下同源没有 /api，直接跳过那一次必然 404 的探测
-  const bases = window.__STATIC_DATA__ ? [LIVE_ORIGIN] : ['', LIVE_ORIGIN];
-  if (state.mode !== 'static') {
-    for (const base of bases) {
-      try {
-        const res = await fetch(`${base}/api/snapshot${force ? '?force=1' : ''}`, { cache: 'no-store' });
-        const ctype = res.headers.get('content-type') || '';
-        if (res.ok && ctype.includes('json')) {
-          state.mode = 'live';
-          state.apiBase = base;
-          return await res.json();
-        }
-      } catch {
-        /* 换下一个来源 */
-      }
-    }
-    state.mode = 'static';
-  }
-  const res = await fetch(`./data/snapshot.json?t=${Date.now()}`, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`找不到 data/snapshot.json（HTTP ${res.status}）`);
+const FETCH_TIMEOUT_MS = 25000;
+
+async function getJson(url) {
+  const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  const ctype = res.headers.get('content-type') || '';
+  if (!res.ok || !ctype.includes('json')) throw new Error(`HTTP ${res.status}`);
   return await res.json();
 }
 
+// 构建产物里的快照（GitHub Pages 上是 CDN，几百毫秒；本地没有就当作失败）
+async function fetchStaticSnapshot() {
+  return await getJson(`./data/snapshot.json?t=${Date.now()}`);
+}
+
+// 实时接口：同源 → 远程 Worker
+async function fetchLiveSnapshot(force) {
+  const bases = window.__STATIC_DATA__ ? [LIVE_ORIGIN] : ['', LIVE_ORIGIN];
+  let lastErr = null;
+  for (const base of bases) {
+    try {
+      const snap = await getJson(`${base}/api/snapshot${force ? '?force=1' : ''}`);
+      state.mode = 'live';
+      state.apiBase = base;
+      return snap;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  state.mode = state.snapshot?.static ? 'static' : 'offline';
+  throw lastErr || new Error('实时接口不可用');
+}
+
 function refreshLivePill() {
-  if (state.error) return setLive('err', `连接失败：${state.error}`);
+  if (state.error) {
+    if (state.snapshot) {
+      return setLive('err', `实时中断（${state.error}）· 显示 ${timeAgo(state.lastSuccess)} 的数据`);
+    }
+    return setLive('err', `连接失败：${state.error}`);
+  }
   const snap = state.snapshot;
   if (!snap) return;
   const broken = snap.boards.filter((b) => b.error).length;
@@ -98,7 +113,18 @@ function refreshLivePill() {
     return setLive(broken ? 'err' : 'ok', `静态快照 · 生成于 ${timeAgo(gen)}${broken ? ` · ${broken} 个榜单异常` : ''}`);
   }
   const stale = snap.boards.filter((b) => b.stale).length;
-  setLive(broken ? 'err' : 'ok', `${stale ? '缓存' : '实时'} · ${timeAgo(state.lastSuccess)}`);
+  const push = state.streaming ? '推送中' : stale ? '缓存' : '轮询';
+  setLive(broken ? 'err' : 'ok', `${push} · ${timeAgo(state.lastSuccess)}`);
+}
+
+function applySnapshot(snap) {
+  state.prev = state.snapshot;
+  state.snapshot = snap;
+  state.error = null;
+  state.lastSuccess = Date.now();
+  computeChanges();
+  refreshLivePill();
+  render();
 }
 
 async function load({ force = false } = {}) {
@@ -107,15 +133,8 @@ async function load({ force = false } = {}) {
   setLive('loading', '刷新中…');
   $('#refreshBtn').disabled = true;
   try {
-    const snap = await fetchSnapshot(force);
-
-    state.prev = state.snapshot;
-    state.snapshot = snap;
-    state.error = null;
-    state.lastSuccess = Date.now();
-    computeChanges();
-    refreshLivePill();
-    render();
+    const snap = await fetchLiveSnapshot(force);
+    applySnapshot(snap);
   } catch (err) {
     state.error = err.message || String(err);
     refreshLivePill();
@@ -770,14 +789,65 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeDrawer();
 });
 
+// 推送帧是 gzip 过的二进制（Worker 侧手动压的），字符串帧也兼容
+async function decodeFrame(data) {
+  if (typeof data === 'string') return JSON.parse(data);
+  const buf = data instanceof Blob ? await data.arrayBuffer() : data;
+  const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return await new Response(stream).json();
+}
+
+// Worker 的 Durable Object 会主动推最新快照过来；连不上就退回轮询
+let socket = null;
+function startStream() {
+  if (state.streamRetries > 3) return;
+  const origin = window.__STATIC_DATA__ ? LIVE_ORIGIN : location.origin;
+  const url = `${origin.replace(/^http/, 'ws')}/api/stream`;
+  try {
+    socket = new WebSocket(url);
+  } catch {
+    state.streamRetries = 4;
+    return;
+  }
+  socket.addEventListener('open', () => {
+    state.streaming = true;
+    state.streamRetries = 0;
+    state.mode = 'live';
+    refreshLivePill();
+  });
+  socket.addEventListener('message', async (ev) => {
+    try {
+      const snap = await decodeFrame(ev.data);
+      if (snap && Array.isArray(snap.boards)) applySnapshot(snap);
+    } catch {
+      /* 忽略坏包 */
+    }
+  });
+  socket.addEventListener('close', () => {
+    state.streaming = false;
+    state.streamRetries += 1;
+    refreshLivePill();
+    setTimeout(startStream, 5000);
+  });
+  socket.addEventListener('error', () => {
+    state.streaming = false;
+  });
+}
+
 let timer = null;
 function schedule() {
   clearTimeout(timer);
   if (!state.auto) return;
+  // 有推送时轮询只做兜底（60 秒一次），没有推送才按用户选的间隔轮询
+  const interval = state.streaming
+    ? 60000
+    : state.mode === 'static'
+      ? Math.max(state.interval, 60000)
+      : state.interval;
   timer = setTimeout(async () => {
-    if (!document.hidden) await load();
+    if (!document.hidden && !state.streaming) await load();
     schedule();
-  }, state.mode === 'static' ? Math.max(state.interval, 60000) : state.interval);
+  }, interval);
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -789,5 +859,23 @@ setInterval(() => {
   if (!state.loading) refreshLivePill();
 }, 1000);
 
-load();
-schedule();
+// 启动顺序：先用构建快照把首屏铺满（快），再去连实时接口（Worker 冷启可能要 10 秒）
+async function bootstrap() {
+  try {
+    const snap = await fetchStaticSnapshot();
+    state.snapshot = snap;
+    if (window.__STATIC_DATA__) state.mode = 'static';
+    state.lastSuccess = Date.now();
+    state.error = null;
+    computeChanges();
+    refreshLivePill();
+    render();
+  } catch {
+    /* 没有静态快照（本地开发常见），直接等实时 */
+  }
+  await load();
+  schedule();
+  startStream();
+}
+
+bootstrap();
