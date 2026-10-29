@@ -68,6 +68,39 @@ function diffMap(snap) {
 const LIVE_ORIGIN = 'https://board.fireflydle.games';
 const FETCH_TIMEOUT_MS = 25000;
 
+// ---------------------------------------------------------------- 访问统计
+// 只上报聚合量（PV/榜单切换/CSV 下载/外链点击），不采集任何页面内容；本地开发不上报。
+const TRACK_ORIGIN = LIVE_ORIGIN;
+const CAN_TRACK = !/^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/.test(location.hostname);
+
+function track(kind, data) {
+  if (!CAN_TRACK) return;
+  try {
+    const body = JSON.stringify({ k: kind, ...(data || {}) });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(`${TRACK_ORIGIN}/api/hit`, new Blob([body], { type: 'text/plain;charset=UTF-8' }));
+    } else {
+      fetch(`${TRACK_ORIGIN}/api/hit`, { method: 'POST', body, keepalive: true, mode: 'no-cors' });
+    }
+  } catch {
+    /* 统计失败不影响页面 */
+  }
+}
+
+async function refreshOnline() {
+  if (!CAN_TRACK) return;
+  try {
+    const res = await fetch(`${TRACK_ORIGIN}/api/online`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return;
+    const d = await res.json();
+    $('#onlineNum').textContent = String(Number(d.sockets || 0));
+    $('#onlineBadge').hidden = false;
+  } catch {
+    /* 拿不到就不显示 */
+  }
+}
+
+
 async function getJson(url) {
   const res = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   const ctype = res.headers.get('content-type') || '';
@@ -201,6 +234,7 @@ function renderSidebar() {
     btn.querySelector('.n').textContent = b.error ? '!' : b.rows.length;
     btn.title = b.error ? `上游异常：${b.error}` : `${b.rows.length} 条记录`;
     btn.addEventListener('click', () => {
+      track('board', { b: b.id, t: b.title });
       state.boardId = b.id;
       state.sort = { key: 'rank', dir: 1 };
       state.search = '';
@@ -829,6 +863,7 @@ function csvForBoard(board) {
 
 // 静态模式下没有 /api/export.csv，前端自己拼 CSV；本地服务模式仍走服务端导出
 $('#exportBtn').addEventListener('click', (e) => {
+  track('csv', { b: state.boardId });
   if (state.mode !== 'static') return;
   const board = boardById(state.boardId);
   if (!board) return;
@@ -844,6 +879,8 @@ $('#exportBtn').addEventListener('click', (e) => {
 });
 
 // ---------------------------------------------------------------- wiring
+
+$('#sourceLink').addEventListener('click', () => track('out', { b: state.boardId }));
 
 $('#refreshBtn').addEventListener('click', () => load({ force: true }));
 
@@ -999,5 +1036,9 @@ async function bootstrap() {
   schedule();
   startStream();
 }
+
+track('pv', { r: document.referrer || '', p: location.pathname });
+refreshOnline();
+setInterval(refreshOnline, 30000);
 
 bootstrap();

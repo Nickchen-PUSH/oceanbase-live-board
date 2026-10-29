@@ -11,9 +11,15 @@
     "run_worker_first": ["/api/*"]
   },
   "durable_objects": {
-    "bindings": [{ "name": "BOARD_HUB", "class_name": "BoardHub" }]
+    "bindings": [
+      { "name": "BOARD_HUB", "class_name": "BoardHub" },
+      { "name": "BOARD_STATS", "class_name": "BoardStats" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BoardHub"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BoardHub"] },
+    { "tag": "v2", "new_sqlite_classes": ["BoardStats"] }
+  ],
   "routes": [{ "pattern": "board.fireflydle.games", "custom_domain": true }],
   "vars": {
     "CAMP_ID": "21"

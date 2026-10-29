@@ -639,3 +639,18 @@ tr.row-flash { animation: flash 1.6s ease-out; }
 }
 
 #timingChart circle.raw { fill: #9db2c9; opacity: 0.55; }
+
+/* 顶栏在线人数 */
+.online {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted, #6b7e99);
+  background: #eef3fa;
+  border: 1px solid var(--line, #dfe7f2);
+  border-radius: 99px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+.online b { font-weight: 650; color: var(--accent, #086fff); font-variant-numeric: tabular-nums; }
