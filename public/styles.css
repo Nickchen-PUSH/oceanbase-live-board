@@ -457,6 +457,9 @@ tr.row-flash { animation: flash 1.6s ease-out; }
 .ms .k { font-size: 10px; color: var(--muted); }
 .ms .v { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .ms .h { font-size: 9px; color: #9aa8bd; }
+.ms.hot { border-color: #f3c08a; background: #fff9f3; }
+.ms.hot .k { color: #b4651a; }
+.ms.hot .v { color: #c2691f; }
 
 .seg {
   display: inline-flex;
@@ -486,6 +489,9 @@ tr.row-flash { animation: flash 1.6s ease-out; }
 .chart .area-queue { fill: rgba(8, 111, 255, .14); }
 .chart .area-judge { fill: rgba(15, 157, 118, .14); }
 .chart .line-queue { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.chart .recent-band { fill: rgba(224, 123, 57, .07); }
+.chart .recent-line { stroke: #e07b39; stroke-width: 1.4; stroke-dasharray: 5 3; }
+.chart .recent-label { fill: #b4651a; font-size: 10px; font-weight: 600; }
 .chart .line-judge { fill: none; stroke: var(--up); stroke-width: 2; stroke-linejoin: round; }
 .chart .dot-judge { fill: #fff; stroke: var(--up); stroke-width: 1.5; }
 .chart .empty { padding: 28px 0; text-align: center; color: var(--muted); font-size: 12px; }
@@ -536,9 +542,12 @@ tr.row-flash { animation: flash 1.6s ease-out; }
   font-variant-numeric: tabular-nums;
   display: flex;
   justify-content: flex-end;
+  align-items: baseline;
   gap: 6px;
+  min-width: 132px;
+  white-space: nowrap;
 }
-.tt-val em { font-style: normal; color: #b8c4d6; }
+.tt-val em { font-style: normal; color: #b8c4d6; white-space: nowrap; }
 
 .timing-note {
   margin: 10px 0 0;

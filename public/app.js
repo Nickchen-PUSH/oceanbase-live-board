@@ -409,6 +409,8 @@ function aggOf(arr, metric) {
   return quantile(arr, 0.5);
 }
 
+const RECENT_WINDOW_MS = 30 * 60 * 1000;
+
 function timingModel(board) {
   const cacheKey = `${timingCacheKey}|${board.id}`;
   if (timingCache.has(cacheKey)) return timingCache.get(cacheKey);
@@ -435,6 +437,10 @@ function timingModel(board) {
       });
     }
     const last = pts[pts.length - 1].t;
+    // 最近窗口：默认近 30 分钟；样本太稀疏时退回最后 20 条
+    let recent = pts.filter((p) => last - p.t <= RECENT_WINDOW_MS);
+    if (recent.length < 5) recent = pts.slice(Math.max(0, pts.length - 20));
+    model.recent = { pts: recent, from: recent.length ? recent[0].t : last, to: last };
     if (!model.series.length || model.series[model.series.length - 1].t !== last) {
       const win = pts.slice(Math.max(0, pts.length - w));
       model.series.push({
@@ -467,7 +473,7 @@ function fmtClock(ts) {
 }
 
 // 时间轴曲线：浅点=每次评测的实际耗时，粗线=滚动窗口统计
-function svgTimeChart(series, raw, { width = 900, height = 168 } = {}) {
+function svgTimeChart(series, raw, { width = 900, height = 168, recent = null } = {}) {
   const pad = { l: 58, r: 14, t: 12, b: 24 };
   const iw = width - pad.l - pad.r;
   const ih = height - pad.t - pad.b;
@@ -479,6 +485,12 @@ function svgTimeChart(series, raw, { width = 900, height = 168 } = {}) {
   const y = (v) => pad.t + ih - Math.min(1, v / maxV) * ih;
   const clipId = `clip${(svgSeq += 1)}`;
   const parts = [`<clipPath id="${clipId}"><rect x="${pad.l}" y="${pad.t}" width="${iw}" height="${ih}" /></clipPath>`];
+
+  // 最近窗口底色
+  if (recent && recent.to > recent.from) {
+    const bx = Math.max(pad.l, x(recent.from));
+    parts.push(`<rect x="${bx.toFixed(1)}" y="${pad.t}" width="${(width - pad.r - bx).toFixed(1)}" height="${ih}" class="recent-band" />`);
+  }
 
   // 网格 + Y 轴
   for (let k = 0; k <= 3; k += 1) {
@@ -501,6 +513,15 @@ function svgTimeChart(series, raw, { width = 900, height = 168 } = {}) {
   parts.push(`<path d="M ${x(t0).toFixed(1)},${y(series[0].queue).toFixed(1)} L ${upper} L ${x(t1).toFixed(1)},${y(series[series.length - 1].queue).toFixed(1)} Z" class="area-judge" />`);
   parts.push(`<path d="M ${lower}" class="line-queue" />`);
   parts.push(`<path d="M ${upper}" class="line-judge" />`);
+
+  // 最近平均等待参考线
+  if (recent && recent.queue >= 0 && recent.queue <= maxV) {
+    const ry = y(recent.queue).toFixed(1);
+    parts.push(`<line x1="${pad.l}" y1="${ry}" x2="${width - pad.r}" y2="${ry}" class="recent-line" />`);
+    parts.push(
+      `<text x="${width - pad.r - 4}" y="${(Number(ry) - 4).toFixed(1)}" class="recent-label" text-anchor="end">最近等待 ${fmtDur(recent.queue)}</text>`,
+    );
+  }
 
   // 平滑点 + tooltip
   for (const p of series) {
@@ -530,6 +551,13 @@ function renderTiming(board) {
   const all = model.pts.map((p) => p.sec);
   const judges = model.pts.map((p) => p.judge);
   const queues = model.pts.map((p) => p.queue);
+  const rec = model.recent?.pts || [];
+  const recentQueue = rec.length ? aggOf(rec.map((p) => p.queue), state.metric) : 0;
+  const recentTotal = rec.length ? aggOf(rec.map((p) => p.sec), state.metric) : 0;
+  const recentSpan = rec.length > 1 ? (rec[rec.length - 1].t - rec[0].t) / 1000 : 0;
+  const recentHint = rec.length ? `最近 ${rec.length} 条 · 跨 ${fmtDur(recentSpan)}` : '样本不足';
+  const recentCard = `<div class="ms hot"><span class="k">最近${metricLabel}等待</span><span class="v">${fmtDur(recentQueue)}</span><span class="h">${recentHint} · 端到端 ${fmtDur(recentTotal)}</span></div>`;
+
   const cards = [
     ['平均端到端', fmtDur(aggOf(all, 'avg')), `中位 ${fmtDur(quantile(all, 0.5))}`],
     ['等待（推算）', fmtDur(aggOf(queues, state.metric)), '含多次提交间隔'],
@@ -538,7 +566,10 @@ function renderTiming(board) {
   ];
   $('#timingMetrics').innerHTML = isAggregate
     ? ''
-    : cards
+    : `<div class="ms"><span class="k">${cards[0][0]}</span><span class="v">${cards[0][1]}</span><span class="h">${cards[0][2]}</span></div>` +
+      recentCard +
+      cards
+        .slice(1)
         .map(
           ([k, v, hint]) =>
             `<div class="ms"><span class="k">${k}</span><span class="v">${v}</span><span class="h">${hint}</span></div>`,
@@ -563,7 +594,9 @@ function renderTiming(board) {
       judge: aggOf(p.judges, state.metric),
       queue: aggOf(p.queues, state.metric),
     }));
-    chartEl.innerHTML = svgTimeChart(series, model.pts);
+    chartEl.innerHTML = svgTimeChart(series, model.pts, {
+      recent: { from: model.recent?.from || 0, to: model.recent?.to || 0, queue: recentQueue },
+    });
   }
 
   // 各赛道对比
@@ -578,6 +611,7 @@ function renderTiming(board) {
         median: quantile(secs, 0.5),
         judge: m.baseline,
         queue: Math.max(0, quantile(secs, 0.5) - m.baseline),
+        recentQueue: m.recent?.pts?.length ? aggOf(m.recent.pts.map((p) => p.queue), state.metric) : 0,
       };
     })
     .filter((r) => r.n > 0)
@@ -593,7 +627,7 @@ function renderTiming(board) {
         <span class="tt-bar"><span class="tt-fill" style="width:${w.toFixed(1)}%">
           <i class="tt-queue" style="width:${(100 - jw).toFixed(1)}%"></i><i class="tt-judge" style="width:${jw.toFixed(1)}%"></i>
         </span></span>
-        <span class="tt-val">${fmtDur(r.median)}<em>${r.n} 条</em></span>
+        <span class="tt-val">${fmtDur(r.median)}<em>${r.n} 条 · 近 ${fmtDur(r.recentQueue)}</em></span>
       </button>`;
     })
     .join('');
@@ -800,6 +834,8 @@ async function decodeFrame(data) {
 // Worker 的 Durable Object 会主动推最新快照过来；连不上就退回轮询
 let socket = null;
 function startStream() {
+  // 本地 node dev server 没有 Durable Object，跳过 WS
+  if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
   if (state.streamRetries > 3) return;
   const origin = window.__STATIC_DATA__ ? LIVE_ORIGIN : location.origin;
   const url = `${origin.replace(/^http/, 'ws')}/api/stream`;
