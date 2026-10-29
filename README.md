@@ -67,20 +67,29 @@ npx vercel --prod         # 首跑会问项目名，接受默认即可
 
 也可以在 Vercel 面板里 Import 这个仓库，零配置（静态目录 `public`、函数目录 `api` 都按约定识别）。函数响应带 `Cache-Control: public, s-maxage=12, stale-while-revalidate=120`，所有访客共享 CDN 缓存，上游最多每 12 秒被打一次。
 
-### GitHub Pages（纯静态快照）
+### GitHub Pages + Cloudflare Worker（当前线上方案）
 
-Pages 只有静态文件，所以抓取搬到 CI：Actions 每 10 分钟跑 `scripts/build-data.mjs`，把快照写成 `dist/data/snapshot.json` 再发布。前端会自动识别环境：
+Pages 只托管静态文件，所以线上是「静态外壳 + 远程实时 API」：
+
+- **页面**：<https://zzstar101.github.io/oceanbase-live-board/> —— 纯静态，Actions 部署
+- **实时数据**：<https://board.fireflydle.games/api/*> —— Cloudflare Worker（跨域 `Access-Control-Allow-Origin: *`，边缘缓存 12 秒）
+- **兜底**：Worker 不可达时前端自动读 `data/snapshot.json`（Actions 每 10 分钟重抓一次）
+
+这样页面在 GitHub Pages 上，数据照样 15 秒一轮真·实时，不依赖 Pages 的构建周期。
+
+> 为什么不用 `*.workers.dev`：本机网络对 workers.dev 的 SNI 被阻断（DNS 被污染到 192.133.77.197，直连真实 CF IP 也 `Connection reset`），而 `www.cloudflare.com` / `api.cloudflare.com` 正常 —— 所以给 Worker 挂了自有域名 `board.fireflydle.games`（`wrangler.jsonc` 里 `routes[].custom_domain`）。
 
 | 模式 | 判定 | 数据来源 | 刷新 |
 | --- | --- | --- | --- |
-| 本地 / Vercel | `/api/snapshot` 返回 JSON | 服务端实时抓取 | 5~60 秒可调 |
-| 静态托管 | `/api/snapshot` 返回 404 | `data/snapshot.json`（构建产物） | 跟随 workflow 周期（≥60 秒轮询） |
+| 本地 / Vercel / Worker 直接托管 | 同源 `/api/snapshot` 返回 JSON | 服务端实时抓取 | 5~60 秒可调 |
+| GitHub Pages | 构建时注入 `window.__STATIC_DATA__` | 远程 Worker `/api/snapshot`；失败再用 `data/snapshot.json` | 15 秒；静态兜底 ≥60 秒 |
 
-顶栏会直说数据年龄：静态模式显示「静态快照 · 生成于 3 分钟前」。CSV 导出在静态模式由前端生成，功能与本地一致。
+顶栏会直说数据年龄：实时模式「实时 · 3 秒前」，静态兜底「静态快照 · 生成于 3 分钟前」。CSV 导出跟随实际数据源。
 
 ```bash
-node scripts/build-data.mjs                 # 生成 dist/
+node scripts/build-data.mjs                 # 生成 dist/（快照兜底）
 python3 -m http.server 8792 -d dist         # 本地预览静态版
+npx wrangler deploy                         # 上线 Worker（含自定义域）
 ```
 
 启用：仓库 Settings → Pages → Source 选 **GitHub Actions**，再跑一次 `.github/workflows/pages.yml`（schedule / push / 手动 dispatch 均触发）。上游抓取失败时 job 失败、旧页面保持不变。
