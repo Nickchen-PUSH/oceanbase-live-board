@@ -424,7 +424,7 @@ function timingPoints(board) {
     if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
     const sec = (b - a) / 1000;
     if (sec <= 0) continue;
-    pts.push({ t: a, sec, name: r.name });
+    pts.push({ t: a, sec, done: b, name: r.name });
   }
   pts.sort((x, y) => x.t - y.t);
   return pts;
@@ -456,7 +456,7 @@ const OUTLIER_FACTOR = 10; // 修正后仍超过 max(P99, 10 × 中位数) 的�
 function detectPauses(pts) {
   if (pts.length < 8) return [];
   // 只用「完成」事件：提交是用户行为，不能证明平台在评测；只有出分才说明评测在跑。
-  const evs = pts.map((p) => p.t + p.sec * 1000).sort((a, b) => a - b);
+  const evs = pts.map((p) => p.done).sort((a, b) => a - b);
   const gaps = [];
   for (let i = 1; i < evs.length; i++) gaps.push(evs[i] - evs[i - 1]);
   const threshold = Math.max(PAUSE_GAP_MIN_MS, PAUSE_GAP_FACTOR * quantile(gaps, 0.5));
@@ -491,7 +491,7 @@ function cleanPoints(rawPts) {
   for (const p of rawPts) {
     p.rawSec = p.sec;
     if (!pauses.length) continue;
-    const ov = overlapMs(p.t, p.t + p.sec * 1000, pauses);
+    const ov = overlapMs(p.t, p.done, pauses);
     if (ov > 0) {
       p.pausedSec = ov / 1000;
       p.sec = Math.max(0, p.sec - ov / 1000);
@@ -504,7 +504,7 @@ function cleanPoints(rawPts) {
   const fence = Math.max(quantile(positives, 0.99), med * OUTLIER_FACTOR, 60);
   const pts = rawPts.filter((p) => p.sec > 0 && p.sec <= fence);
   // 只有真正影响到留存样本的暂停窗口才画出来，避免图上铺满无意义的灰条
-  const drawn = pauses.filter(([a, b]) => pts.some((p) => p.t < b && p.t + p.sec * 1000 > a));
+  const drawn = pauses.filter(([a, b]) => pts.some((p) => p.t < b && p.done > a));
   return {
     pts,
     drawnPauses: drawn,
@@ -530,7 +530,7 @@ function timingModel(board) {
   const model = { pts, cleanup, pauses: drawnPauses, latest: null, series: [], baseline: 0, insufficient: pts.length < 3, board };
   // 最近一次「有更新」的记录（完成时间最晚的那条），用于展示最新评测的提交时间
   for (const p of pts) {
-    const done = p.t + p.sec * 1000;
+    const done = p.done;
     if (model.latest && done <= model.latest.done) continue;
     model.latest = { name: p.name, submit: p.t, done, sec: p.sec, pausedSec: p.pausedSec || 0 };
   }
@@ -549,7 +549,36 @@ function timingModel(board) {
     }
   }
   if (pts.length) {
-    model.baseline = Math.min(quantile(pts.map((p) => p.sec), 0.2), 300);
+    // 单次评测时长（T）估计：
+    // ① 队列基本空的样本（提交时在途 ≤1、且区间不跨停摆）≈ 真实评测开销 → 取中位数
+    // ② 样本不足时用「完成节拍 × 隐含并发槽位」推断（队列饱和时间隔 = T ÷ 并发，同集群实测 2~5 槽，取 2.5）
+    const idleSecs = [];
+    for (const p of pts) {
+      const inflight = pts.filter((o) => o !== p && o.t <= p.t && o.done > p.t).length;
+      const overl = model.pauses.length ? overlapMs(p.t, p.done, model.pauses) : 0;
+      if (inflight <= 1 && overl < 60 * 1000) idleSecs.push(p.sec);
+    }
+    const doneTimes = pts.map((p) => p.done).sort((a, b) => a - b);
+    const cgaps = [];
+    for (let i = 1; i < doneTimes.length; i++) {
+      const a = doneTimes[i - 1];
+      const b2 = doneTimes[i];
+      if (model.pauses.length && overlapMs(a, b2, model.pauses) > 0) continue;
+      cgaps.push((b2 - a) / 1000);
+    }
+    const cadence = cgaps.length >= 5 ? quantile(cgaps, 0.5) : 0;
+    const medAll = quantile(pts.map((p) => p.sec), 0.5) || 0;
+    if (idleSecs.length >= 20) {
+      model.baseline = quantile(idleSecs, 0.5);
+      model.judge = { kind: 'measured', value: model.baseline, samples: idleSecs.length, cadence, c: cadence > 0 ? model.baseline / cadence : null };
+    } else if (cadence > 0) {
+      const SLOTS = 2.5;
+      model.baseline = Math.min(cadence * SLOTS, medAll * 0.9);
+      model.judge = { kind: 'inferred', value: model.baseline, samples: idleSecs.length, cadence, c: SLOTS };
+    } else {
+      model.baseline = Math.min(quantile(pts.map((p) => p.sec), 0.2), 300);
+      model.judge = { kind: 'fallback', value: model.baseline, samples: idleSecs.length, cadence: 0, c: null };
+    }
     for (const p of pts) {
       p.judge = Math.min(p.sec, model.baseline);
       p.queue = Math.max(0, p.sec - p.judge);
@@ -778,12 +807,19 @@ function renderTiming(board) {
       <span class="tl-glabel">全榜 · ${model.pts.length} 条有效记录${model.cleanup && model.cleanup.excludedN ? `（原始 ${model.cleanup.rawN} 条）` : ''} · 口径：${metricLabel}${model.cleanup && model.cleanup.pausedN ? '（已扣暂停）' : ''}</span>
       <div class="tl-figs">
         <div class="f"><b>${fmtDur(aggOf(all, 'avg'))}</b><span>端到端（中位 ${fmtDur(quantile(all, 0.5))}）</span></div>
-        <div class="f"><b>${fmtDur(aggOf(queues, state.metric))}</b><span>等待（推算）</span></div>
-        <div class="f"><b>${fmtDur(aggOf(judges, state.metric))}</b><span>评测（推算）</span></div>
+        <div class="f"><b>${fmtDur(aggOf(queues, state.metric))}</b><span>等待（端到端 − 评测）</span></div>
+        <div class="f" title="${judgeTip}"><b>${fmtDur(aggOf(judges, state.metric))}</b><span>${judgeLabel}</span></div>
       </div></div>`);
   }
   $('#timingFigures').innerHTML = figs.join('');
 
+  const jl = model.judge || {};
+  const judgeLabel = jl.kind === 'measured' ? `评测（实测 ${jl.samples} 条）` : jl.kind === 'inferred' ? '评测（推断 · 节拍×2.5）' : '评测（推算）';
+  const judgeTip = jl.kind === 'measured'
+    ? `队列基本空的 ${jl.samples} 条样本，单次评测中位 ${fmtDur(jl.value)}${jl.c ? `；完成节拍 ${fmtDur(jl.cadence)}，隐含 ${jl.c.toFixed(1)} 个并发槽` : ''}。`
+    : jl.kind === 'inferred'
+      ? `无排队样本只有 ${jl.samples} 条，改用完成节拍 ${fmtDur(jl.cadence)} × 2.5 个并发槽推断（队列饱和时间隔 = 单次时长 ÷ 并发数）。`
+      : '样本不足，按最快 20% 耗时粗略估计。';
   const cl = model.cleanup;
   let cleanNote = '';
   if (!isAggregate && cl) {
