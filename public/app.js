@@ -525,10 +525,14 @@ function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, l
   }
 
   // 网格 + Y 轴
+  // 纵轴统一单位，避免 18 小时 / 1.0 天 混排
+  const yUnit = yStep >= 86400 ? 86400 : yStep >= 3600 ? 3600 : yStep >= 60 ? 60 : 1;
+  const ySuffix = { 86400: ' 天', 3600: ' 小时', 60: ' 分钟', 1: ' 秒' }[yUnit];
+  const yLabel = (v) => (v === 0 ? '0' : `${Number((v / yUnit).toFixed(v / yUnit < 10 ? 1 : 0))}${ySuffix}`);
   for (let k = 0; k <= 4; k += 1) {
     const v = yStep * k;
     parts.push(`<line x1="${pad.l}" y1="${y(v).toFixed(1)}" x2="${width - pad.r}" y2="${y(v).toFixed(1)}" class="grid" />`);
-    parts.push(`<text x="${pad.l - 8}" y="${(y(v) + 4).toFixed(1)}" class="axis" text-anchor="end">${fmtDur(v)}</text>`);
+    parts.push(`<text x="${pad.l - 8}" y="${(y(v) + 4).toFixed(1)}" class="axis" text-anchor="end">${yLabel(v)}</text>`);
   }
 
   // 原始点（超出纵轴范围的直接跳过）
