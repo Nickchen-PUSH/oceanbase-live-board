@@ -490,13 +490,18 @@ function fmtClock(ts) {
 }
 
 // 时间轴曲线：浅点=每次评测的实际耗时，粗线=滚动窗口统计
-function niceScale(maxV, count = 3) {
+// 纵轴用「人类友好」的刻度步长（秒 → 分 → 小时 → 天），避免 13.9 小时 / 1.2 天 这种读数
+const HUMAN_STEPS = [
+  1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 432000,
+];
+
+function niceScale(maxV, count = 4) {
   if (!(maxV > 0)) return { max: 1, step: 1 };
-  const raw = maxV / count;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const norm = raw / mag;
-  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
-  return { max: step * count, step };
+  for (const s of HUMAN_STEPS) {
+    if (s * count >= maxV) return { max: s * count, step: s };
+  }
+  const top = HUMAN_STEPS[HUMAN_STEPS.length - 1];
+  return { max: top * count, step: top };
 }
 
 function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, latest = null } = {}) {
@@ -507,7 +512,7 @@ function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, l
   const t1 = series[series.length - 1].t;
   const span = Math.max(1, t1 - t0);
   const peak = Math.max(1e-6, ...series.map((p) => p.total));
-  const { max: maxV, step: yStep } = niceScale(peak, 3);
+  const { max: maxV, step: yStep } = niceScale(peak, 4);
   const x = (t) => pad.l + ((t - t0) / span) * iw;
   const y = (v) => pad.t + ih - Math.min(1, v / maxV) * ih;
   const clipId = `clip${(svgSeq += 1)}`;
@@ -520,7 +525,7 @@ function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, l
   }
 
   // 网格 + Y 轴
-  for (let k = 0; k <= 3; k += 1) {
+  for (let k = 0; k <= 4; k += 1) {
     const v = yStep * k;
     parts.push(`<line x1="${pad.l}" y1="${y(v).toFixed(1)}" x2="${width - pad.r}" y2="${y(v).toFixed(1)}" class="grid" />`);
     parts.push(`<text x="${pad.l - 8}" y="${(y(v) + 4).toFixed(1)}" class="axis" text-anchor="end">${fmtDur(v)}</text>`);
