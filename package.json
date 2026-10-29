@@ -1,0 +1,14 @@
+{
+  "name": "oceanbase-live-board",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Real-time leaderboard dashboard for OceanBase 训练营 tracks + 数据库大赛总榜 (camp 21)",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

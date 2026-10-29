@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "oceanbase-live-board",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-01-01",
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // 只有 /api/* 进 Worker，静态文件直接由边缘资源服务
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    "CAMP_ID": "21"
+  }
+}
