@@ -73,24 +73,32 @@
     <section class="timing" id="timingPanel">
       <div class="timing-head">
         <div class="timing-title">
-          <h3>评测耗时曲线 <span class="tag-approx">近似</span></h3>
-          <p class="meta" id="timingMeta">按提交日期聚合的端到端耗时（排队 + 评测）</p>
+          <h3>评测耗时 <span class="tag-approx">近似</span></h3>
+          <p class="meta" id="timingMeta">—</p>
         </div>
-        <div class="timing-metrics" id="timingMetrics"></div>
-        <div class="seg" id="timingMetric" role="group" aria-label="统计口径">
-          <button type="button" data-metric="avg" class="on">平均</button>
-          <button type="button" data-metric="median">中位数</button>
-          <button type="button" data-metric="p90">P90</button>
+        <div class="timing-actions">
+          <div class="seg" id="timingMetric" role="group" aria-label="统计口径">
+            <button type="button" data-metric="avg" class="on">平均</button>
+            <button type="button" data-metric="median">中位数</button>
+            <button type="button" data-metric="p90">P90</button>
+          </div>
+          <button type="button" class="btn-tiny" id="timingToggle" aria-expanded="false">展开曲线</button>
         </div>
-        <button type="button" class="btn-tiny" id="timingToggle" aria-expanded="false">展开图表</button>
       </div>
+
+      <p class="tl-latest" id="timingLatest"></p>
+      <div class="tl-figures" id="timingFigures"></div>
+
       <div id="timingBody" hidden>
       <div class="chart" id="timingChart"></div>
       <div class="chart-legend">
-        <span class="lg lg-queue"><i></i>等待（排队 + 多次提交间隔）</span>
-        <span class="lg lg-judge"><i></i>评测（≈基准）</span>
-        <span class="lg-note">基准 = 该榜最快那 20% 记录的耗时（上限 5 分钟），视为「纯评测耗时」；超出部分算等待</span>
+        <span class="lg lg-queue"><i></i>等待（推算）</span>
+        <span class="lg lg-judge"><i></i>评测（推算）</span>
+        <span class="lg lg-raw"><i></i>每次提交（原始点）</span>
+        <span class="lg lg-recent"><i></i>最近窗口</span>
+        <span class="lg lg-latest"><i></i>最新一次评测的提交时间</span>
       </div>
+      <h4 class="tl-sub">各赛道对比 · 中位端到端（灰字为最近等待）</h4>
       <div class="track-timings" id="trackTimings"></div>
       <p class="timing-note">
         数据来源限制：公开接口只有 <code>gmtCreate</code>（该条记录首次提交）与 <code>gmtModified</code>（最后更新）两个时间戳，

@@ -416,7 +416,20 @@ function timingModel(board) {
   if (timingCache.has(cacheKey)) return timingCache.get(cacheKey);
 
   const pts = timingPoints(board);
-  const model = { pts, series: [], baseline: 0, insufficient: pts.length < 3, board };
+  const model = { pts, latest: null, series: [], baseline: 0, insufficient: pts.length < 3, board };
+  // 最近一次「有更新」的记录（完成时间最晚的那条），用于展示最新评测的提交时间
+  for (const r of board.rows) {
+    const done = Date.parse(r.updated);
+    if (!Number.isFinite(done)) continue;
+    if (model.latest && done <= model.latest.done) continue;
+    const submit = Date.parse(r.bestSubmit);
+    model.latest = {
+      name: r.name,
+      submit: Number.isFinite(submit) ? submit : null,
+      done,
+      sec: Number.isFinite(submit) ? (done - submit) / 1000 : null,
+    };
+  }
   if (pts.length) {
     model.baseline = Math.min(quantile(pts.map((p) => p.sec), 0.2), 300);
     for (const p of pts) {
@@ -466,6 +479,10 @@ function fmtDur(sec) {
   return `${(sec / 86400).toFixed(1)} 天`;
 }
 
+function escHtml(v) {
+  return String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
 function fmtClock(ts) {
   const d = new Date(ts);
   const p = (x) => String(x).padStart(2, '0');
@@ -473,14 +490,24 @@ function fmtClock(ts) {
 }
 
 // 时间轴曲线：浅点=每次评测的实际耗时，粗线=滚动窗口统计
-function svgTimeChart(series, raw, { width = 900, height = 168, recent = null } = {}) {
+function niceScale(maxV, count = 3) {
+  if (!(maxV > 0)) return { max: 1, step: 1 };
+  const raw = maxV / count;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const norm = raw / mag;
+  const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+  return { max: step * count, step };
+}
+
+function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, latest = null } = {}) {
   const pad = { l: 58, r: 14, t: 12, b: 24 };
   const iw = width - pad.l - pad.r;
   const ih = height - pad.t - pad.b;
   const t0 = series[0].t;
   const t1 = series[series.length - 1].t;
   const span = Math.max(1, t1 - t0);
-  const maxV = Math.max(1e-6, ...series.map((p) => p.total));
+  const peak = Math.max(1e-6, ...series.map((p) => p.total));
+  const { max: maxV, step: yStep } = niceScale(peak, 3);
   const x = (t) => pad.l + ((t - t0) / span) * iw;
   const y = (v) => pad.t + ih - Math.min(1, v / maxV) * ih;
   const clipId = `clip${(svgSeq += 1)}`;
@@ -494,7 +521,7 @@ function svgTimeChart(series, raw, { width = 900, height = 168, recent = null } 
 
   // 网格 + Y 轴
   for (let k = 0; k <= 3; k += 1) {
-    const v = (maxV * k) / 3;
+    const v = yStep * k;
     parts.push(`<line x1="${pad.l}" y1="${y(v).toFixed(1)}" x2="${width - pad.r}" y2="${y(v).toFixed(1)}" class="grid" />`);
     parts.push(`<text x="${pad.l - 8}" y="${(y(v) + 4).toFixed(1)}" class="axis" text-anchor="end">${fmtDur(v)}</text>`);
   }
@@ -513,6 +540,15 @@ function svgTimeChart(series, raw, { width = 900, height = 168, recent = null } 
   parts.push(`<path d="M ${x(t0).toFixed(1)},${y(series[0].queue).toFixed(1)} L ${upper} L ${x(t1).toFixed(1)},${y(series[series.length - 1].queue).toFixed(1)} Z" class="area-judge" />`);
   parts.push(`<path d="M ${lower}" class="line-queue" />`);
   parts.push(`<path d="M ${upper}" class="line-judge" />`);
+
+  // 最新一次评测的提交时间：末端竖虚线
+  if (latest && latest.submit && latest.submit >= t0 && latest.submit <= t1) {
+    const lx = x(latest.submit).toFixed(1);
+    parts.push(`<line x1="${lx}" y1="${pad.t}" x2="${lx}" y2="${(pad.t + ih).toFixed(1)}" class="latest-line" />`);
+    parts.push(
+      `<text x="${(Number(lx) - 6).toFixed(1)}" y="${(pad.t + 9).toFixed(1)}" class="latest-label" text-anchor="end">最新评测 ${fmtClock(latest.submit)}</text>`,
+    );
+  }
 
   // 最近平均等待参考线
   if (recent && recent.queue >= 0 && recent.queue <= maxV) {
@@ -555,30 +591,70 @@ function renderTiming(board) {
   const recentQueue = rec.length ? aggOf(rec.map((p) => p.queue), state.metric) : 0;
   const recentTotal = rec.length ? aggOf(rec.map((p) => p.sec), state.metric) : 0;
   const recentSpan = rec.length > 1 ? (rec[rec.length - 1].t - rec[0].t) / 1000 : 0;
-  const recentHint = rec.length ? `最近 ${rec.length} 条 · 跨 ${fmtDur(recentSpan)}` : '样本不足';
-  const recentCard = `<div class="ms hot"><span class="k">最近${metricLabel}等待</span><span class="v">${fmtDur(recentQueue)}</span><span class="h">${recentHint} · 端到端 ${fmtDur(recentTotal)}</span></div>`;
+  const dur = (v) => (v == null || !Number.isFinite(v) ? '—' : fmtDur(v));
 
-  const cards = [
-    ['平均端到端', fmtDur(aggOf(all, 'avg')), `中位 ${fmtDur(quantile(all, 0.5))}`],
-    ['等待（推算）', fmtDur(aggOf(queues, state.metric)), '含多次提交间隔'],
-    ['评测（推算）', fmtDur(aggOf(judges, state.metric)), '≈最快 20% 耗时'],
-    ['样本数', String(model.pts.length), `中位 ${fmtDur(quantile(all, 0.5))}`],
-  ];
-  $('#timingMetrics').innerHTML = isAggregate
-    ? ''
-    : `<div class="ms"><span class="k">${cards[0][0]}</span><span class="v">${cards[0][1]}</span><span class="h">${cards[0][2]}</span></div>` +
-      recentCard +
-      cards
-        .slice(1)
-        .map(
-          ([k, v, hint]) =>
-            `<div class="ms"><span class="k">${k}</span><span class="v">${v}</span><span class="h">${hint}</span></div>`,
-        )
-        .join('');
+  // ---------- 1. 最新一次评测：一句话 ----------
+  const lt = model.latest;
+  let latestHtml;
+  if (!lt) {
+    latestHtml = '<span class="tl-badge">最新一次评测</span><span class="tl-main">暂无可用时间戳</span>';
+  } else if (isAggregate) {
+    latestHtml =
+      '<span class="tl-badge">最近更新</span>' +
+      `<span class="tl-main"><b>${escHtml(lt.name)}</b> ${lt.submit ? `${fmtClock(lt.submit)} 首次提交` : '提交时间未知'} → ${fmtClock(lt.done)} 最后更新</span>` +
+      `<span class="tl-tail">参赛跨度 <b>${dur(lt.sec)}</b> · ${timeAgo(lt.done)}</span>`;
+  } else {
+    latestHtml =
+      '<span class="tl-badge">最新一次评测</span>' +
+      `<span class="tl-main"><b>${escHtml(lt.name)}</b> ${lt.submit ? `${fmtClock(lt.submit)} 提交` : '提交时间未知'} → ${fmtClock(lt.done)} 完成</span>` +
+      `<span class="tl-tail">用时 <b>${dur(lt.sec)}</b> · ${timeAgo(lt.done)}</span>`;
+  }
+  $('#timingLatest').innerHTML = latestHtml;
+
+  // ---------- 2. 两组数字：最近 vs 全榜 ----------
+  const figs = [];
+  if (isAggregate) {
+    const spans = [];
+    for (const r of board.rows) {
+      const a = Date.parse(r.bestSubmit);
+      const b = Date.parse(r.updated);
+      if (Number.isFinite(a) && Number.isFinite(b) && b > a) spans.push((b - a) / 1000);
+    }
+    figs.push(`<div class="tl-group">
+      <span class="tl-glabel">全榜 · ${board.rows.length} 支队伍</span>
+      <div class="tl-figs">
+        <div class="f"><b>${dur(quantile(spans, 0.5))}</b><span>中位参赛跨度</span></div>
+        <div class="f"><b>${dur(aggOf(spans, 'avg'))}</b><span>平均参赛跨度</span></div>
+        <div class="f"><b>${spans.length}</b><span>有跨度数据的队伍</span></div>
+      </div></div>`);
+  } else {
+    const recentNote = rec.length
+      ? `最近 ${rec.length} 条${recentSpan > 0 ? ` · 跨 ${fmtDur(recentSpan)}` : ''}`
+      : '样本不足';
+    figs.push(`<div class="tl-group hot">
+      <span class="tl-glabel">${recentNote} · 口径：${metricLabel}</span>
+      <div class="tl-figs">
+        <div class="f"><b>${fmtDur(recentQueue)}</b><span>等待</span></div>
+        <div class="f"><b>${fmtDur(recentTotal)}</b><span>端到端</span></div>
+      </div></div>`);
+    figs.push(`<div class="tl-group">
+      <span class="tl-glabel">全榜 · ${model.pts.length} 条记录 · 口径：${metricLabel}</span>
+      <div class="tl-figs">
+        <div class="f"><b>${fmtDur(aggOf(all, 'avg'))}</b><span>端到端（中位 ${fmtDur(quantile(all, 0.5))}）</span></div>
+        <div class="f"><b>${fmtDur(aggOf(queues, state.metric))}</b><span>等待（推算）</span></div>
+        <div class="f"><b>${fmtDur(aggOf(judges, state.metric))}</b><span>评测（推算）</span></div>
+      </div></div>`);
+  }
+  $('#timingFigures').innerHTML = figs.join('');
 
   $('#timingMeta').textContent = isAggregate
-    ? '总榜是队伍级聚合行（首次建记录 → 最后一次更新），差值代表参赛跨度，不是单次评测耗时 —— 请选一个赛道看曲线'
-    : `${board.title} · 按提交先后排序 · 滚动窗口 ${model.insufficient ? '—' : model.series[0]?.n || 0} 次 · 口径：${metricLabel}`;
+    ? '总榜按队伍聚合（首次提交 → 最后更新），要看单次评测请点左侧赛道'
+    : `按提交先后排序 · 曲线滚动 ${model.insufficient ? '—' : model.series[0]?.n || 0} 次 · 口径：${metricLabel}`;
+
+  // 总榜没有单次评测曲线：隐藏口径切换与展开按钮
+  $('#timingMetric').hidden = isAggregate;
+  $('#timingToggle').hidden = isAggregate;
+  $('#timingBody').hidden = isAggregate || !state.timingOpen;
 
   const chartEl = $('#timingChart');
   if (isAggregate) {
@@ -596,6 +672,7 @@ function renderTiming(board) {
     }));
     chartEl.innerHTML = svgTimeChart(series, model.pts, {
       recent: { from: model.recent?.from || 0, to: model.recent?.to || 0, queue: recentQueue },
+      latest: model.latest,
     });
   }
 
@@ -800,7 +877,7 @@ $('#timingToggle').addEventListener('click', () => {
   state.timingOpen = !state.timingOpen;
   $('#timingBody').hidden = !state.timingOpen;
   const btn = $('#timingToggle');
-  btn.textContent = state.timingOpen ? '收起图表' : '展开图表';
+  btn.textContent = state.timingOpen ? '收起曲线' : '展开曲线';
   btn.setAttribute('aria-expanded', String(state.timingOpen));
 });
 
