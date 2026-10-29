@@ -584,6 +584,7 @@ tr.row-flash { animation: flash 1.6s ease-out; }
 .lg-raw i { background: #9db2c9; opacity: .7; border-radius: 999px; }
 .lg-recent i { background: rgba(224, 123, 57, .25); }
 .lg-latest i { background: #7b5cd6; width: 3px; border-radius: 1px; }
+.lg-pause i { background: rgba(120, 135, 155, .28); }
 .lg-note { margin-left: auto; color: #9aa8bd; }
 
 .track-timings { margin-top: 10px; display: grid; gap: 2px; max-height: 196px; overflow: auto; }
@@ -654,3 +655,6 @@ tr.row-flash { animation: flash 1.6s ease-out; }
   white-space: nowrap;
 }
 .online b { font-weight: 650; color: var(--accent, #086fff); font-variant-numeric: tabular-nums; }
+
+/* 评测暂停时段底色 */
+.chart .pause-band { fill: rgba(120, 135, 155, .16); }

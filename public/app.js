@@ -424,7 +424,7 @@ function timingPoints(board) {
     if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
     const sec = (b - a) / 1000;
     if (sec <= 0) continue;
-    pts.push({ t: a, sec });
+    pts.push({ t: a, sec, name: r.name });
   }
   pts.sort((x, y) => x.t - y.t);
   return pts;
@@ -446,24 +446,111 @@ function aggOf(arr, metric) {
 
 const RECENT_WINDOW_MS = 30 * 60 * 1000;
 
+// 评测暂停识别：相邻「活跃事件」（任一提交或完成）之间的空档，超过阈值就认为平台那段时间没在评测。
+// 阈值 = max(60 分钟, 10 × 该榜事件间隔中位数)——跟着各赛道吞吐自适应，宁可漏判也不误判。
+const PAUSE_GAP_MIN_MS = 60 * 60 * 1000;
+const PAUSE_GAP_FACTOR = 10;
+const PAUSE_SPAN_MAX_RATIO = 0.6; // 暂停总时长占比过高说明样本太稀疏，整体不做修正
+const OUTLIER_FACTOR = 10; // 修正后仍超过 max(P99, 10 × 中位数) 的当极端异常剔除
+
+function detectPauses(pts) {
+  if (pts.length < 8) return [];
+  const evs = [];
+  for (const p of pts) {
+    evs.push(p.t);
+    evs.push(p.t + p.sec * 1000);
+  }
+  evs.sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < evs.length; i++) gaps.push(evs[i] - evs[i - 1]);
+  const threshold = Math.max(PAUSE_GAP_MIN_MS, PAUSE_GAP_FACTOR * quantile(gaps, 0.5));
+  const merged = [];
+  for (let i = 1; i < evs.length; i++) {
+    if (evs[i] - evs[i - 1] < threshold) continue;
+    const last = merged[merged.length - 1];
+    if (last && evs[i - 1] <= last[1]) last[1] = Math.max(last[1], evs[i]);
+    else merged.push([evs[i - 1], evs[i]]);
+  }
+  const span = evs[evs.length - 1] - evs[0];
+  const paused = merged.reduce((sum, [a, b]) => sum + (b - a), 0);
+  if (!span || paused / span > PAUSE_SPAN_MAX_RATIO) return [];
+  return merged;
+}
+
+function overlapMs(a, b, windows) {
+  let sum = 0;
+  for (const [s0, e0] of windows) {
+    const lo = Math.max(a, s0);
+    const hi = Math.min(b, e0);
+    if (hi > lo) sum += hi - lo;
+  }
+  return sum;
+}
+
+// 扣掉暂停时段、剔除极端样本；返回干净样本、清洗统计
+function cleanPoints(rawPts) {
+  const pauses = detectPauses(rawPts);
+  let pausedN = 0; // 有多少条记录跨了暂停时段
+  let deductSec = 0; // 这些记录总共被扣掉多少时间
+  for (const p of rawPts) {
+    p.rawSec = p.sec;
+    if (!pauses.length) continue;
+    const ov = overlapMs(p.t, p.t + p.sec * 1000, pauses);
+    if (ov > 0) {
+      p.pausedSec = ov / 1000;
+      p.sec = Math.max(0, p.sec - ov / 1000);
+      deductSec += ov / 1000;
+      pausedN += 1;
+    }
+  }
+  const positives = rawPts.map((p) => p.sec).filter((v) => v > 0);
+  const med = quantile(positives, 0.5) || 0;
+  const fence = Math.max(quantile(positives, 0.99), med * OUTLIER_FACTOR, 60);
+  const pts = rawPts.filter((p) => p.sec > 0 && p.sec <= fence);
+  // 只有真正影响到留存样本的暂停窗口才画出来，避免图上铺满无意义的灰条
+  const drawn = pauses.filter(([a, b]) => pts.some((p) => p.t < b && p.t + p.sec * 1000 > a));
+  return {
+    pts,
+    drawnPauses: drawn,
+    cleanup: {
+      rawN: rawPts.length,
+      keptN: pts.length,
+      excludedN: rawPts.length - pts.length,
+      pausedN,
+      deductSec,
+      pauseWin: pauses.length,
+      pauseSec: pauses.reduce((sum, [a, b]) => sum + (b - a) / 1000, 0),
+      fence,
+    },
+  };
+}
+
 function timingModel(board) {
   const cacheKey = `${timingCacheKey}|${board.id}`;
   if (timingCache.has(cacheKey)) return timingCache.get(cacheKey);
 
-  const pts = timingPoints(board);
-  const model = { pts, latest: null, series: [], baseline: 0, insufficient: pts.length < 3, board };
+  const rawPts = timingPoints(board);
+  const { pts, cleanup, drawnPauses } = cleanPoints(rawPts);
+  const model = { pts, cleanup, pauses: drawnPauses, latest: null, series: [], baseline: 0, insufficient: pts.length < 3, board };
   // 最近一次「有更新」的记录（完成时间最晚的那条），用于展示最新评测的提交时间
-  for (const r of board.rows) {
-    const done = Date.parse(r.updated);
-    if (!Number.isFinite(done)) continue;
+  for (const p of pts) {
+    const done = p.t + p.sec * 1000;
     if (model.latest && done <= model.latest.done) continue;
-    const submit = Date.parse(r.bestSubmit);
-    model.latest = {
-      name: r.name,
-      submit: Number.isFinite(submit) ? submit : null,
-      done,
-      sec: Number.isFinite(submit) ? (done - submit) / 1000 : null,
-    };
+    model.latest = { name: p.name, submit: p.t, done, sec: p.sec, pausedSec: p.pausedSec || 0 };
+  }
+  if (!model.latest) {
+    for (const r of board.rows) {
+      const done = Date.parse(r.updated);
+      if (!Number.isFinite(done)) continue;
+      if (model.latest && done <= model.latest.done) continue;
+      const submit = Date.parse(r.bestSubmit);
+      model.latest = {
+        name: r.name,
+        submit: Number.isFinite(submit) ? submit : null,
+        done,
+        sec: Number.isFinite(submit) ? (done - submit) / 1000 : null,
+      };
+    }
   }
   if (pts.length) {
     model.baseline = Math.min(quantile(pts.map((p) => p.sec), 0.2), 300);
@@ -539,7 +626,7 @@ function niceScale(maxV, count = 4) {
   return { max: top * count, step: top };
 }
 
-function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, latest = null } = {}) {
+function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, latest = null, pauses = [] } = {}) {
   const pad = { l: 58, r: 14, t: 12, b: 24 };
   const iw = width - pad.l - pad.r;
   const ih = height - pad.t - pad.b;
@@ -552,6 +639,16 @@ function svgTimeChart(series, raw, { width = 900, height = 182, recent = null, l
   const y = (v) => pad.t + ih - Math.min(1, v / maxV) * ih;
   const clipId = `clip${(svgSeq += 1)}`;
   const parts = [`<clipPath id="${clipId}"><rect x="${pad.l}" y="${pad.t}" width="${iw}" height="${ih}" /></clipPath>`];
+
+  // 评测暂停时段（这段时间平台没有任何提交/完成，耗时统计里已把重叠部分扣掉）
+  for (const [s0, e0] of pauses) {
+    const bx = Math.max(pad.l, x(s0));
+    const bw = Math.min(width - pad.r, x(e0)) - bx;
+    if (bw <= 0.5) continue;
+    parts.push(
+      `<rect x="${bx.toFixed(1)}" y="${pad.t}" width="${bw.toFixed(1)}" height="${ih}" class="pause-band"><title>评测暂停 ${fmtClock(s0)} → ${fmtClock(e0)}（${fmtDur((e0 - s0) / 1000)}）</title></rect>`,
+    );
+  }
 
   // 最近窗口底色
   if (recent && recent.to > recent.from) {
@@ -676,13 +773,13 @@ function renderTiming(board) {
       ? `最近 ${rec.length} 条${recentSpan > 0 ? ` · 跨 ${fmtDur(recentSpan)}` : ''}`
       : '样本不足';
     figs.push(`<div class="tl-group hot">
-      <span class="tl-glabel">${recentNote} · 口径：${metricLabel}</span>
+      <span class="tl-glabel">${recentNote} · 口径：${metricLabel}${model.cleanup && model.cleanup.pausedN ? '（已扣暂停）' : ''}</span>
       <div class="tl-figs">
         <div class="f"><b>${fmtDur(recentQueue)}</b><span>等待</span></div>
         <div class="f"><b>${fmtDur(recentTotal)}</b><span>端到端</span></div>
       </div></div>`);
     figs.push(`<div class="tl-group">
-      <span class="tl-glabel">全榜 · ${model.pts.length} 条记录 · 口径：${metricLabel}</span>
+      <span class="tl-glabel">全榜 · ${model.pts.length} 条有效记录${model.cleanup && model.cleanup.excludedN ? `（原始 ${model.cleanup.rawN} 条）` : ''} · 口径：${metricLabel}${model.cleanup && model.cleanup.pausedN ? '（已扣暂停）' : ''}</span>
       <div class="tl-figs">
         <div class="f"><b>${fmtDur(aggOf(all, 'avg'))}</b><span>端到端（中位 ${fmtDur(quantile(all, 0.5))}）</span></div>
         <div class="f"><b>${fmtDur(aggOf(queues, state.metric))}</b><span>等待（推算）</span></div>
@@ -691,9 +788,28 @@ function renderTiming(board) {
   }
   $('#timingFigures').innerHTML = figs.join('');
 
+  const cl = model.cleanup;
+  let cleanNote = '';
+  if (!isAggregate && cl) {
+    const parts2 = [];
+    if (cl.excludedN) parts2.push(`剔除 ${cl.excludedN} 条极端异常（> ${fmtDur(cl.fence)}）`);
+    if (cl.pauseWin) {
+      parts2.push(
+        cl.pausedN
+          ? `发现 ${cl.pauseWin} 段评测暂停（共 ${fmtDur(cl.pauseSec)}），影响 ${cl.pausedN} 条记录（重叠部分已扣除）`
+          : `发现 ${cl.pauseWin} 段评测暂停（共 ${fmtDur(cl.pauseSec)}），不影响已有样本`,
+      );
+    } else {
+      parts2.push('未发现评测暂停时段');
+    }
+    cleanNote = parts2.join(' · ');
+  }
   $('#timingMeta').textContent = isAggregate
     ? '总榜按队伍聚合（首次提交 → 最后更新），要看单次评测请点左侧赛道'
-    : `按提交先后排序 · 曲线滚动 ${model.insufficient ? '—' : model.series[0]?.n || 0} 次 · 口径：${metricLabel}`;
+    : `按提交先后排序 · 曲线滚动 ${model.insufficient ? '—' : model.series[0]?.n || 0} 次 · 口径：${metricLabel} · ${cleanNote}`;
+  $('#timingMeta').title = isAggregate
+    ? ''
+    : '评测暂停 = 整条赛道连续 max(60 分钟, 10×事件间隔中位数) 内没有任何提交或完成；跨暂停的那部分耗时已扣除。极端异常 = 修正后仍超过 max(P99, 10×中位数)。';
 
   // 总榜没有单次评测曲线：隐藏口径切换与展开按钮
   $('#timingMetric').hidden = isAggregate;
@@ -717,6 +833,7 @@ function renderTiming(board) {
     chartEl.innerHTML = svgTimeChart(series, model.pts, {
       recent: { from: model.recent?.from || 0, to: model.recent?.to || 0, queue: recentQueue },
       latest: model.latest,
+      pauses: model.pauses || [],
     });
   }
 
