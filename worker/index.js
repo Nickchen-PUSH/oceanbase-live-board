@@ -211,7 +211,7 @@ export class BoardStats {
       } else {
         b.pv += 1;
         this.bump(b.dev, dev);
-        const country = request.cf?.country || '未知';
+        const country = request.headers.get('x-geo') || '未知';
         this.bump(b.geo, country);
         this.bump(b.refs, referrerBucket(evt.r));
         const ip = request.headers.get('cf-connecting-ip') || '0.0.0.0';
@@ -541,7 +541,10 @@ export default {
           });
         }
         const stats = env.BOARD_STATS.get(env.BOARD_STATS.idFromName('camp21'));
-        return stats.fetch(new Request('https://stats/hit', { method: 'POST', body: request.body, headers: request.headers }));
+        // request.cf 只在主 Worker 请求里存在，DO 里拿不到 → 用头传过去
+        const fwd = new Headers(request.headers);
+        fwd.set('x-geo', request.cf?.country || '未知');
+        return stats.fetch(new Request('https://stats/hit', { method: 'POST', body: request.body, headers: fwd }));
       }
 
       if (p === '/api/stats' && env?.BOARD_STATS) {

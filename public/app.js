@@ -93,8 +93,9 @@ async function refreshOnline() {
     const res = await fetch(`${TRACK_ORIGIN}/api/online`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
     if (!res.ok) return;
     const d = await res.json();
-    $('#onlineNum').textContent = String(Number(d.sockets || 0));
-    $('#onlineBadge').hidden = false;
+    const n = Number(d.sockets || 0);
+    $('#onlineNum').textContent = String(n);
+    $('#onlineBadge').hidden = n <= 0;
   } catch {
     /* 拿不到就不显示 */
   }
@@ -973,6 +974,7 @@ function startStream() {
     state.streamRetries = 0;
     state.mode = 'live';
     refreshLivePill();
+    refreshOnline(); // 连上之后在线人数才有意义
   });
   socket.addEventListener('message', async (ev) => {
     try {
