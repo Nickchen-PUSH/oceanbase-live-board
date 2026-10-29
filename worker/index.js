@@ -570,7 +570,20 @@ export default {
 
       if (p === '/api/online' && env?.BOARD_HUB) {
         const hub = env.BOARD_HUB.get(env.BOARD_HUB.idFromName('camp21'));
-        return hub.fetch(new Request('https://hub/api/online'));
+        const res = await hub.fetch(new Request('https://hub/api/online'));
+        let body = null;
+        try {
+          body = await res.json();
+        } catch {
+          body = null;
+        }
+        // DO 刚部署后会短暂跑旧代码（旧版对未知路径返回快照），这里做兼容归一化
+        const sockets = Number(body?.sockets ?? body?.push?.clients ?? 0);
+        return json(
+          { sockets: Number.isFinite(sockets) ? sockets : 0, lastPush: body?.lastPush || null, intervalMs: PUSH_INTERVAL_MS },
+          200,
+          { 'Cache-Control': 'no-store' },
+        );
       }
 
       if (p === '/stats') {

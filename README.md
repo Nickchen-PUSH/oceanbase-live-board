@@ -102,6 +102,7 @@ npx wrangler deploy                         # 上线 Worker（含自定义域）
 - **搜索 / 排序**：按队名、学校、导师、省份过滤；表头点击排序（成绩与提交时间默认降序）。
 - **队伍详情抽屉**：点任意一行，看学校 / 导师 / 省份 / 最优提交时间，以及该队在**每个赛道**的名次与得分（总榜与赛道通过 `userId` 关联）。
 - **导出 CSV**：当前榜单全量导出，UTF-8 BOM，Excel 直接打开不乱码。
+- **实时在线人数**：顶栏「在线 N」= 当前挂在这条实时推送（WebSocket）上的连接数，20~30 秒刷新一次。
 
 ![赛道榜与详情抽屉](docs/screenshot-track-drawer.png)
 
@@ -135,6 +136,10 @@ oceanbase-live-board/
 | `GET /api/snapshot?force=1` | 跳过缓存强制刷新 |
 | `GET /api/board/<id>` | 单个榜单，`id` = `total` 或 `q<questionId>` |
 | `GET /api/export.csv?board=<id>` | 导出该榜单 CSV |
+| `GET /api/online` | 当前在线人数（实时推送连接数） |
+| `POST /api/hit` | 访问打点（`{k:"pv"\|"board"\|"csv"\|"out"}`，返回 `{"ok":true}`） |
+| `GET /api/stats?key=<STATS_KEY>&days=7` | 访问统计汇总（JSON，无 key 或 key 错一律 404） |
+| `GET /stats?key=<STATS_KEY>` | 统计后台页（HTML，无 key 或 key 错一律 404） |
 
 ### 上游接口（公开、免登录）
 
@@ -152,6 +157,26 @@ oceanbase-live-board/
 - `queryCompetitionScoreList` 是**真分页**（`pageNo` 生效，`total` 可信）；必须同时带 `campId=21` 与 `scoreType=0`，否则 400 或空数据。
 - 赛道榜字段用 `userName`，总榜用 `groupName`；时间字段是 UTC（`gmtCreate` = 页面「最优提交时间」/「最优成绩提交日」，`gmtModified` = 该记录的更新时间）。
 
+## 访问统计
+
+六项指标全部由 Worker 自己统计（`BoardStats` Durable Object，按北京时间切天），不依赖第三方脚本：
+
+| 指标 | 口径 |
+| --- | --- |
+| PV / UV | 每次页面加载记 1 次 PV；UV 按 `hash(IP + UA + 日期盐)` 去重（不落原始 IP） |
+| 来源 | `document.referrer` 归到 GitHub / 飞书 / 微信·QQ / 搜索引擎 / 社交平台 / 直接访问 |
+| 地区 / 设备 | `request.cf.country`（主 Worker 用 `x-geo` 头传给 DO）；UA 归到 desktop / mobile / tablet / bot |
+| 榜单点击热度 | 侧边栏切榜时打点，按榜单标题计数 |
+| CSV 下载 / 外链点击 | 导出按钮、上游原始页链接点击各记一次 |
+| 当前在线 | 实时推送（WebSocket）连接数，`/api/online` 与后台页「当前在线」卡片 |
+
+后台地址：`https://board.fireflydle.games/stats?key=<STATS_KEY>`（支持 7/14/30 天，30 秒自动刷新）。
+`STATS_KEY` 用 `wrangler secret put STATS_KEY` 设置（值存在仓库外的 `.stats-key`，已 gitignore）；**没配 key 时 `/stats` 返回 503，key 不对返回 404，不暴露页面存在**。
+
+隐私：只记聚合计数（PV/UV/事件/来源桶/国家/设备类型），不存原始 IP、不写 cookie、不采集任何页面内容；hash 用日期盐，跨天不可关联。
+
+> 想再要一份 Cloudflare 官方的独立统计（PV/UV/来源/地区/设备，在 CF 后台看），可在 Cloudflare 控制台 → Web Analytics 手动添加 `board.fireflydle.games` 拿 beacon token——wrangler 的 OAuth token 没有 `analytics/rum` 权限，脚本建不了站点。自定义事件（榜单点击/CSV/在线）Web Analytics 不支持，所以这几项仍然只在本项目后台里。
+
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
@@ -161,6 +186,7 @@ oceanbase-live-board/
 | `CAMP_ID` | `21` | 只测过 21；其它 camp 在上游返回 500 |
 | `CACHE_TTL_MS` | `12000` | 上游结果缓存时长 |
 | `UPSTREAM_TIMEOUT_MS` | `15000` | 单次上游请求超时（带 3 次退避重试） |
+| `STATS_KEY`（Worker secret） | 无 | 统计后台 `/stats` 与 `/api/stats` 的访问口令；不配则后台不可用 |
 
 ## 已知局限
 
