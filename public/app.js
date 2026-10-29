@@ -19,6 +19,7 @@ const state = {
   error: null,
   changedKeys: new Set(), // keys that moved on the latest update (for flash)
   drawerRow: null,
+  apiBase: '', // 实时 API 的 origin（同源为空串，GitHub Pages 形态下是 Worker 域名）
   metric: 'avg', // 耗时曲线口径：avg | median | p90
   timingOpen: false, // 耗时曲线默认折叠，避免占满首屏
   mode: null, // 'live'（本地 node 服务）| 'static'（GitHub Pages 静态快照）
@@ -58,23 +59,29 @@ function diffMap(snap) {
 
 // ---------------------------------------------------------------- networking
 
-// 构建脚本会在 index.html 里打 __STATIC_DATA__ 标记（GitHub Pages 形态）：
-// 有标记就直接读 data/snapshot.json，否则先试同源 /api/snapshot，404/非 JSON 再回落静态文件。
-if (typeof window !== 'undefined' && window.__STATIC_DATA__) state.mode = 'static';
+// 数据来源优先级：
+//   1) 同源 /api/*（node server.mjs 或 Cloudflare Worker 直接托管这个页面时）
+//   2) 远程 Worker（https://board.fireflydle.games/api/*，带 CORS）——GitHub Pages 形态靠它拿实时数据
+//   3) 构建时生成的 data/snapshot.json（CI 每 10 分钟刷新，兜底）
+const LIVE_ORIGIN = 'https://board.fireflydle.games';
 async function fetchSnapshot(force) {
+  // GitHub Pages 形态下同源没有 /api，直接跳过那一次必然 404 的探测
+  const bases = window.__STATIC_DATA__ ? [LIVE_ORIGIN] : ['', LIVE_ORIGIN];
   if (state.mode !== 'static') {
-    try {
-      // 相对路径：本地服务在根路径、GitHub Pages 在 /<repo>/ 子路径都能用
-      const res = await fetch(`./api/snapshot${force ? '?force=1' : ''}`, { cache: 'no-store' });
-      const ctype = res.headers.get('content-type') || '';
-      if (res.ok && ctype.includes('json')) {
-        state.mode = 'live';
-        return await res.json();
+    for (const base of bases) {
+      try {
+        const res = await fetch(`${base}/api/snapshot${force ? '?force=1' : ''}`, { cache: 'no-store' });
+        const ctype = res.headers.get('content-type') || '';
+        if (res.ok && ctype.includes('json')) {
+          state.mode = 'live';
+          state.apiBase = base;
+          return await res.json();
+        }
+      } catch {
+        /* 换下一个来源 */
       }
-      state.mode = 'static';
-    } catch {
-      state.mode = 'static';
     }
+    state.mode = 'static';
   }
   const res = await fetch(`./data/snapshot.json?t=${Date.now()}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`找不到 data/snapshot.json（HTTP ${res.status}）`);
@@ -200,7 +207,9 @@ function renderHeader() {
   $('#boardMeta').textContent = bits.join(' · ');
 
   $('#exportBtn').href =
-    state.mode === 'static' ? '#' : `./api/export.csv?board=${encodeURIComponent(board.id)}`;
+    state.mode === 'static'
+      ? '#'
+      : `${state.apiBase || ''}/api/export.csv?board=${encodeURIComponent(board.id)}`;
   $('#sourceLink').href = board.source || 'https://open.oceanbase.com/competition/armory';
   $('#campId').textContent = state.snapshot.campId;
 }
