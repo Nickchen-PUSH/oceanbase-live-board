@@ -58,7 +58,9 @@ function diffMap(snap) {
 
 // ---------------------------------------------------------------- networking
 
-// GitHub Pages 上没有 node 服务：/api/snapshot 404 → 回落到构建时生成的 data/snapshot.json
+// 构建脚本会在 index.html 里打 __STATIC_DATA__ 标记（GitHub Pages 形态）：
+// 有标记就直接读 data/snapshot.json，否则先试同源 /api/snapshot，404/非 JSON 再回落静态文件。
+if (typeof window !== 'undefined' && window.__STATIC_DATA__) state.mode = 'static';
 async function fetchSnapshot(force) {
   if (state.mode !== 'static') {
     try {

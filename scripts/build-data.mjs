@@ -49,6 +49,14 @@ await fs.mkdir(path.join(OUT_DIR, 'data'), { recursive: true });
 await fs.writeFile(path.join(OUT_DIR, 'data', 'snapshot.json'), JSON.stringify(snap));
 // GitHub Pages 走 Actions 产物部署时用不到 .nojekyll，但直接推 dist 到分支时需要
 await fs.writeFile(path.join(OUT_DIR, '.nojekyll'), '');
+// 给前端一个静态标记：直接读 data/snapshot.json，不必先去 /api/snapshot 撞一次 404
+const indexHtml = await fs.readFile(path.join(OUT_DIR, 'index.html'), 'utf8');
+if (!indexHtml.includes('__STATIC_DATA__')) {
+  await fs.writeFile(
+    path.join(OUT_DIR, 'index.html'),
+    indexHtml.replace('</head>', '    <script>window.__STATIC_DATA__ = true;</script>\n  </head>'),
+  );
+}
 
 const kb = (n) => `${(n / 1024).toFixed(0)} KB`;
 const bytes = Buffer.byteLength(JSON.stringify(snap));

@@ -1,5 +1,8 @@
 # OceanBase 榜单实时看板
 
+**在线地址：<https://zzstar101.github.io/oceanbase-live-board/>**
+（GitHub Pages 静态版，Actions 每 10 分钟重抓一次上游；数据新鲜度见页面右上角状态灯）
+
 把 open.oceanbase.com 上的 **数据库大赛总榜（初赛英雄榜）** 和 **seekdb AI 训练营 11 个赛道榜** 抓成一份可实时刷新的看板。
 零依赖 Node（`node:http` + 原生 `fetch`），一条命令启动。
 
@@ -40,9 +43,9 @@ node server.mjs          # 或 npm start
 
 | 部署方式 | 数据新鲜度 | 需要什么 | 成本 |
 | --- | --- | --- | --- |
-| **Vercel**（`api/` 函数 + `public/` 静态，推荐） | 真实时（12s CDN 缓存） | Vercel 账号 | 免费额度足够 |
+| **Vercel**（`api/` 函数 + `public/` 静态） | 真实时（12s CDN 缓存） | Vercel 账号 | 免费额度足够 |
 | Cloudflare Worker / 任何 Node 主机 | 真实时 | 对应账号 | 免费额度足够 |
-| GitHub Pages（Actions 定时抓快照） | 跟随 workflow 周期（≥10 分钟） | 只要仓库 | 免费 |
+| **GitHub Pages**（Actions 定时抓快照，当前线上方案） | 跟随 workflow 周期（10 分钟） | 只要仓库 | 免费 |
 
 ### Vercel
 
