@@ -757,6 +757,13 @@ function renderTiming(board) {
   const recentQueue = rec.length ? aggOf(rec.map((p) => p.queue), state.metric) : 0;
   const recentTotal = rec.length ? aggOf(rec.map((p) => p.sec), state.metric) : 0;
   const recentSpan = rec.length > 1 ? (rec[rec.length - 1].t - rec[0].t) / 1000 : 0;
+  const jl = model.judge || {};
+  const judgeLabel = jl.kind === 'measured' ? `评测（实测 ${jl.samples} 条）` : jl.kind === 'inferred' ? '评测（推断 · 节拍×2.5）' : '评测（推算）';
+  const judgeTip = jl.kind === 'measured'
+    ? `队列基本空的 ${jl.samples} 条样本，单次评测中位 ${fmtDur(jl.value)}${jl.c ? `；完成节拍 ${fmtDur(jl.cadence)}，隐含 ${jl.c.toFixed(1)} 个并发槽` : ''}。`
+    : jl.kind === 'inferred'
+      ? `无排队样本只有 ${jl.samples} 条，改用完成节拍 ${fmtDur(jl.cadence)} × 2.5 个并发槽推断（队列饱和时间隔 = 单次时长 ÷ 并发数）。`
+      : '样本不足，按最快 20% 耗时粗略估计。';
   const dur = (v) => (v == null || !Number.isFinite(v) ? '—' : fmtDur(v));
 
   // ---------- 1. 最新一次评测：一句话 ----------
@@ -813,13 +820,6 @@ function renderTiming(board) {
   }
   $('#timingFigures').innerHTML = figs.join('');
 
-  const jl = model.judge || {};
-  const judgeLabel = jl.kind === 'measured' ? `评测（实测 ${jl.samples} 条）` : jl.kind === 'inferred' ? '评测（推断 · 节拍×2.5）' : '评测（推算）';
-  const judgeTip = jl.kind === 'measured'
-    ? `队列基本空的 ${jl.samples} 条样本，单次评测中位 ${fmtDur(jl.value)}${jl.c ? `；完成节拍 ${fmtDur(jl.cadence)}，隐含 ${jl.c.toFixed(1)} 个并发槽` : ''}。`
-    : jl.kind === 'inferred'
-      ? `无排队样本只有 ${jl.samples} 条，改用完成节拍 ${fmtDur(jl.cadence)} × 2.5 个并发槽推断（队列饱和时间隔 = 单次时长 ÷ 并发数）。`
-      : '样本不足，按最快 20% 耗时粗略估计。';
   const cl = model.cleanup;
   let cleanNote = '';
   if (!isAggregate && cl) {
