@@ -446,8 +446,8 @@ function aggOf(arr, metric) {
 
 const RECENT_WINDOW_MS = 30 * 60 * 1000;
 
-// 评测暂停识别：相邻「活跃事件」（任一提交或完成）之间的空档，超过阈值就认为平台那段时间没在评测。
-// 阈值 = max(60 分钟, 10 × 该榜事件间隔中位数)——跟着各赛道吞吐自适应，宁可漏判也不误判。
+// 评测暂停识别：两次「出分」之间空档过长，就认为平台那段时间没在评测（提交不算数——提交是用户行为）。
+// 阈值 = max(60 分钟, 10 × 该榜完成间隔中位数)——跟着各赛道吞吐自适应，宁可漏判也不误判。
 const PAUSE_GAP_MIN_MS = 60 * 60 * 1000;
 const PAUSE_GAP_FACTOR = 10;
 const PAUSE_SPAN_MAX_RATIO = 0.6; // 暂停总时长占比过高说明样本太稀疏，整体不做修正
@@ -455,12 +455,8 @@ const OUTLIER_FACTOR = 10; // 修正后仍超过 max(P99, 10 × 中位数) 的�
 
 function detectPauses(pts) {
   if (pts.length < 8) return [];
-  const evs = [];
-  for (const p of pts) {
-    evs.push(p.t);
-    evs.push(p.t + p.sec * 1000);
-  }
-  evs.sort((a, b) => a - b);
+  // 只用「完成」事件：提交是用户行为，不能证明平台在评测；只有出分才说明评测在跑。
+  const evs = pts.map((p) => p.t + p.sec * 1000).sort((a, b) => a - b);
   const gaps = [];
   for (let i = 1; i < evs.length; i++) gaps.push(evs[i] - evs[i - 1]);
   const threshold = Math.max(PAUSE_GAP_MIN_MS, PAUSE_GAP_FACTOR * quantile(gaps, 0.5));
