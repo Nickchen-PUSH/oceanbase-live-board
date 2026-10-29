@@ -171,6 +171,8 @@ oceanbase-live-board/
 | 当前在线 | 实时推送（WebSocket）连接数，`/api/online` 与后台页「当前在线」卡片 |
 
 后台地址：`https://board.fireflydle.games/stats?key=<STATS_KEY>`（支持 7/14/30 天，30 秒自动刷新）。
+
+![访问统计后台](docs/screenshot-stats.png)
 `STATS_KEY` 用 `wrangler secret put STATS_KEY` 设置（值存在仓库外的 `.stats-key`，已 gitignore）；**没配 key 时 `/stats` 返回 503，key 不对返回 404，不暴露页面存在**。
 
 隐私：只记聚合计数（PV/UV/事件/来源桶/国家/设备类型），不存原始 IP、不写 cookie、不采集任何页面内容；hash 用日期盐，跨天不可关联。
