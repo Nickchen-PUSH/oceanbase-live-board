@@ -25,6 +25,8 @@ const state = {
   metric: 'avg', // 耗时曲线口径：avg | median | p90
   timingOpen: false, // 耗时曲线默认折叠，避免占满首屏
   mode: null, // 'live'（本地 node 服务）| 'static'（GitHub Pages 静态快照）
+  promoCut: 50, // 晋级形势：晋级名额
+  promoOpen: null, // 晋级形势：展开名单的赛道 id
 };
 
 // ---------------------------------------------------------------- formatting
@@ -216,6 +218,7 @@ function render() {
   renderTiming(board);
   fillPredictBoards();
   renderPredict();
+  renderPromotion();
 }
 
 function renderSidebar() {
@@ -1187,6 +1190,173 @@ function fillPredictBoards() {
   else if (!sel.value && boards.length) sel.value = boards[0].id;
 }
 
+// ---------------------------------------------------------------- 晋级形势
+// 名额只按满分计：剩余名额 = 晋级名额 − 总分满分的队数。
+// 公开接口不给各赛道满分，这里取各赛道当前最高分当满分（每个赛道都已经有满分队伍时成立），
+// 总分满分 = 各赛道满分之和；和总榜最高分对不上时面板会提示。
+// 「只差一个赛道」= 除该赛道外其余赛道都已满分；按该赛道的状态再分成 部分分 / 0 分 / 无记录。
+
+const PROMO_EPS = 1e-6;
+const PROMO_STATUS = [
+  ['partial', '有部分分', '还要交一版更好的'],
+  ['zero', '已判 0 分', '要重交，重新排队'],
+  ['none', '无记录', '没交，或还在排队'],
+];
+let promoCache = { key: '', model: null };
+
+function promotionModel(snap) {
+  if (promoCache.key === snap.generatedAt) return promoCache.model;
+  const total = snap.boards.find((b) => b.kind === 'total');
+  const tracks = snap.boards.filter((b) => b.kind === 'track' && b.rows.length);
+  let model = null;
+  if (total?.rows.length && tracks.length) {
+    const full = new Map(tracks.map((b) => [b.id, Math.max(...b.rows.map((r) => r.score || 0))]));
+    const fullTotal = [...full.values()].reduce((s, v) => s + v, 0);
+    const topTotal = Math.max(...total.rows.map((r) => r.score || 0));
+    const index = new Map(
+      tracks.map((b) => {
+        const m = new Map();
+        for (const r of b.rows) {
+          if (r.userId) m.set(r.userId, r);
+          m.set(`name:${r.name}`, r);
+        }
+        return [b.id, m];
+      }),
+    );
+    const lookup = (b, r) => (r.userId && index.get(b.id).get(r.userId)) || index.get(b.id).get(`name:${r.name}`) || null;
+    const groups = new Map();
+    let fullCount = 0;
+    for (const r of total.rows) {
+      if ((r.score || 0) >= fullTotal - PROMO_EPS) {
+        fullCount += 1;
+        continue;
+      }
+      let miss = null;
+      let n = 0;
+      for (const b of tracks) {
+        const hit = lookup(b, r);
+        if ((hit?.score || 0) < full.get(b.id) - PROMO_EPS) {
+          n += 1;
+          miss = { board: b, row: hit };
+          if (n > 1) break;
+        }
+      }
+      if (n !== 1) continue;
+      const status = !miss.row ? 'none' : (miss.row.score || 0) > 0 ? 'partial' : 'zero';
+      if (!groups.has(miss.board.id)) groups.set(miss.board.id, { board: miss.board, partial: [], zero: [], none: [] });
+      groups.get(miss.board.id)[status].push({ total: r, track: miss.row });
+    }
+    const list = [...groups.values()].map((g) => {
+      const subs = g.board.rows.map((r) => Date.parse(r.bestSubmit)).filter(Number.isFinite);
+      return {
+        ...g,
+        full: full.get(g.board.id),
+        count: g.partial.length + g.zero.length + g.none.length,
+        frontier: subs.length ? Math.max(...subs) : null,
+      };
+    });
+    list.sort((a, b) => b.count - a.count || a.board.title.localeCompare(b.board.title));
+    model = {
+      totalBoard: total,
+      fullTotal,
+      topTotal,
+      fullCount,
+      groups: list,
+      oneShort: list.reduce((s, g) => s + g.count, 0),
+    };
+  }
+  promoCache = { key: snap.generatedAt, model };
+  return model;
+}
+
+function renderPromotion() {
+  const out = $('#promoOut');
+  if (!out || !state.snapshot) return;
+  const m = promotionModel(state.snapshot);
+  if (!m) {
+    out.innerHTML = '<p class="pr-note">总榜或赛道榜还没有数据，暂时算不出来。</p>';
+    return;
+  }
+  const cut = state.promoCut;
+  const left = cut - m.fullCount;
+  const label = left > 0 ? '<span class="pr-label">剩余名额</span>' : '<span class="pr-label warn">名额已满</span>';
+  const head =
+    `<div class="pr-main">${label}<span class="pr-eta">${Math.max(0, left)}</span>` +
+    `<span class="pr-sub">前 ${cut} 名 − 满分（${fmtNum(m.fullTotal)} 分）${m.fullCount} 队` +
+    `${left > 0 ? ` · 差一个赛道满分的 <b>${m.oneShort}</b> 队在抢` : ' · 之后再满分的队伍只能排在后面'}</span></div>`;
+
+  const maxCount = Math.max(1, ...m.groups.map((g) => g.count));
+  const rows = m.groups
+    .map((g) => {
+      const seg = PROMO_STATUS.map(
+        ([k]) => (g[k].length ? `<span class="pm-${k}" style="width:${(g[k].length / maxCount) * 100}%"></span>` : ''),
+      ).join('');
+      const parts = PROMO_STATUS.filter(([k]) => g[k].length)
+        .map(([k, name]) => `${name} ${g[k].length}`)
+        .join(' · ');
+      const on = state.promoOpen === g.board.id;
+      return (
+        `<button type="button" class="tt-row pm-row${on ? ' on' : ''}" data-promo="${escHtml(g.board.id)}" aria-expanded="${on}">` +
+        `<span class="tt-name" title="${escHtml(g.board.title)}">只差 ${escHtml(g.board.title)}</span>` +
+        `<span class="tt-bar"><span class="tt-fill">${seg}</span></span>` +
+        `<span class="tt-val"><b>${g.count} 队</b><em>${parts}</em></span></button>` +
+        (on ? promoList(g) : '')
+      );
+    })
+    .join('');
+
+  const legend = PROMO_STATUS.map(([k, name, tip]) => `<span><i class="pm-dot pm-${k}"></i>${name}：${tip}</span>`).join('');
+  const mismatch =
+    Math.abs(m.topTotal - m.fullTotal) > PROMO_EPS
+      ? `<p class="pr-note warn">总榜最高分 ${fmtNum(m.topTotal)} 和各赛道最高分之和 ${fmtNum(m.fullTotal)} 不一致：可能有赛道还没人拿到满分，满分口径会偏低。</p>`
+      : '';
+  out.innerHTML =
+    head +
+    mismatch +
+    (rows ? `<div class="track-timings pm-rows">${rows}</div><div class="pm-legend">${legend}</div>` : '<p class="pr-note">目前没有只差一个赛道的队伍。</p>') +
+    '<p class="pr-note">各赛道满分取该赛道当前最高分。「已评到」= 该赛道已出分记录里最晚的提交时间，排队中的提交公开接口看不到；' +
+    '名次相同时按平台规则排序，这里不做推测。点赛道展开名单，点队伍看详情。</p>';
+
+  out.querySelectorAll('[data-promo]').forEach((el) => {
+    el.addEventListener('click', () => {
+      state.promoOpen = state.promoOpen === el.dataset.promo ? null : el.dataset.promo;
+      renderPromotion();
+    });
+  });
+  out.querySelectorAll('[data-promo-team]').forEach((el) => {
+    el.addEventListener('click', () => {
+      const row = m.totalBoard.rows.find((r) => rowKey(r) === el.dataset.promoTeam);
+      if (row) openDrawer(m.totalBoard, row);
+    });
+  });
+}
+
+function promoList(g) {
+  const items = PROMO_STATUS.flatMap(([k, name]) => g[k].map((x) => ({ ...x, k, name })));
+  items.sort((a, b) => a.total.rank - b.total.rank);
+  const tr = items
+    .map(
+      (x) =>
+        `<tr data-promo-team="${escHtml(rowKey(x.total))}">` +
+        `<td class="num">${x.total.rank}</td>` +
+        `<td>${escHtml(x.total.name)}</td>` +
+        `<td class="muted">${escHtml(x.total.school || '—')}</td>` +
+        `<td class="num">${fmtScore(x.total.score)}</td>` +
+        `<td><i class="pm-dot pm-${x.k}"></i>${x.track ? `${fmtScore(x.track.score)} / ${fmtNum(g.full)}` : x.name}</td>` +
+        `<td class="muted">${x.track ? fmtTime(x.track.bestSubmit) : '—'}</td></tr>`,
+    )
+    .join('');
+  return (
+    `<div class="pm-list"><p class="pm-list-meta">${escHtml(g.board.title)} 已评到 ${g.frontier ? fmtClock(g.frontier) : '—'} 的提交</p>` +
+    `<table><thead><tr><th>总榜</th><th>队伍</th><th>学校</th><th>总分</th><th>${escHtml(g.board.title)}</th><th>该赛道最优提交</th></tr></thead>` +
+    `<tbody>${tr}</tbody></table></div>`
+  );
+}
+
+function fmtNum(n) {
+  return Number.isInteger(n) ? String(n) : n.toFixed(3);
+}
+
 // ---------------------------------------------------------------- drawer
 
 function openDrawer(board, row) {
@@ -1344,6 +1514,14 @@ $('#predictNow').addEventListener('click', () => {
   d.setSeconds(0, 0);
   $('#predictTime').value = new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
   renderPredict();
+});
+
+// ---- 晋级形势面板 ----
+$('#promoCut').addEventListener('input', (e) => {
+  const v = Math.round(Number(e.target.value));
+  if (!Number.isFinite(v) || v < 1) return;
+  state.promoCut = v;
+  renderPromotion();
 });
 
 document.querySelectorAll('th.sortable').forEach((th) => {
