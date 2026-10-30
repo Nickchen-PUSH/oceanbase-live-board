@@ -214,6 +214,8 @@ function render() {
   renderPodium(board, rows);
   renderTable(board, rows);
   renderTiming(board);
+  fillPredictBoards();
+  renderPredict();
 }
 
 function renderSidebar() {
@@ -240,6 +242,7 @@ function renderSidebar() {
       state.sort = { key: 'rank', dir: 1 };
       state.search = '';
       $('#search').value = '';
+      if (b.kind === 'track') $('#predictBoard').value = b.id;
       render();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     });
@@ -913,6 +916,277 @@ function renderTiming(board) {
     });
 }
 
+// ---------------------------------------------------------------- 出分预测
+// 出分队列有三种形态，分别建模：
+//  · 稳态（饱和 / 缩短 / 变长）：队头的「提交时刻」随钟表匀速前进，
+//    推进速率 r = Δ队头提交时刻 / Δ时钟。r≈1 表示系统满负荷，队头与当前时间同步推进；
+//    r>1 说明队列正在被快速消化（回填），r<1 说明队列在变长。
+//    T 排在队头 F 之后时，等待 (T − F) / r 小时后开跑，再加单次评测时间。
+//  · 批量作业：出分挤在少数几个窗口，中间几十小时零出分，线性外推无意义 → 给下一次窗口。
+const PREDICT_WINDOWS_H = [6, 24, 72];
+
+function predictBursts(pts) {
+  // 把相隔 ≤10 分钟的完成时刻合并成一批（批量回填会成批出分）
+  const out = [];
+  for (const p of pts) {
+    const last = out[out.length - 1];
+    if (last && p.done - last.done <= 10 * 60e3) {
+      last.done = p.done;
+      last.n += 1;
+    } else {
+      out.push({ start: p.done, done: p.done, n: 1 });
+    }
+  }
+  return out;
+}
+
+function predictQueue(board) {
+  if (!board || board.kind !== 'track') return null;
+  const pts = timingPoints(board).slice().sort((a, b) => a.done - b.done);
+  if (!pts.length) return null;
+  const now = Date.now();
+
+  // 推进速率：优先用最近 6 小时的出分样本，样本不足再放宽到 24 / 72 小时
+  let win = null;
+  for (const h of PREDICT_WINDOWS_H) {
+    const set = pts.filter((p) => p.done >= now - h * 3600e3);
+    if (set.length < 5) continue;
+    const front = set[set.length - 1];
+    const back = set[0];
+    const dClockH = (front.done - back.done) / 3600e3;
+    if (dClockH < 0.5) continue; // 全挤在同一时刻，量不出速率
+    const rate = (front.t - back.t) / (dClockH * 3600e3);
+    if (!Number.isFinite(rate) || rate <= 0.05 || rate > 80) continue;
+    win = { front, back, rate, spanH: h, samples: set.length, cadenceSec: (dClockH * 3600) / set.length };
+    break;
+  }
+
+  const bursts = predictBursts(pts);
+  const durs = pts.slice(-60).map((p) => p.sec);
+  return {
+    n: pts.length,
+    win,
+    front: win ? win.front : pts[pts.length - 1],
+    rate: win ? win.rate : null,
+    bursts,
+    lastBurst: bursts[bursts.length - 1] || null,
+    medDur: quantile(durs, 0.5),
+    p90Dur: quantile(durs, 0.9),
+    windows: [...new Set(bursts.slice(-12).map((x) => new Date(x.start).getHours()))].sort((a, b) => a - b),
+  };
+}
+
+function nextWindow(hours, afterMs) {
+  let best = null;
+  for (let day = 0; day < 4; day++) {
+    for (const h of hours) {
+      const d = new Date(afterMs);
+      d.setHours(h, 0, 0, 0);
+      d.setDate(d.getDate() + day);
+      const ms = d.getTime();
+      if (ms < afterMs - 30 * 60e3) continue;
+      if (best == null || ms < best) best = ms;
+    }
+  }
+  return best;
+}
+
+function rateLabelOf(rate) {
+  if (rate == null) return '速率不可测';
+  if (rate >= 2.5) return '回填中（快速消化积压）';
+  if (rate > 1.25) return '积压被消化（队列在缩短）';
+  if (rate >= 0.8) return '饱和（队头与时钟同步）';
+  return '积压在增长（队列在变长）';
+}
+
+function predictEta(board, submitMs) {
+  const now = Date.now();
+  const q = predictQueue(board);
+  if (!q) return { kind: 'none', q: null };
+  const tm = timingModel(board);
+  const judgeKnown = tm.judge?.kind === 'measured';
+  const judgeValue = Number.isFinite(tm.judge?.value) ? tm.judge.value : null;
+  const judgeUsable = judgeKnown || (judgeValue != null && judgeValue >= 15);
+  const judgeSec = judgeUsable ? judgeValue : 0;
+  const judgeMs = judgeSec * 1000;
+
+  if (!q.win) {
+    // 批量作业：给「你提测之后最近的一个出分窗口」
+    const from = Math.max(now, submitMs);
+    const hours = q.windows.length ? q.windows : [new Date(q.front.done).getHours()];
+    const w = nextWindow(hours, from);
+    return {
+      kind: 'batch',
+      q,
+      judgeSec,
+      judgeKnown,
+      etaMs: w,
+      earliest: w != null ? w - 45 * 60e3 : null,
+      latest: w != null ? w + 105 * 60e3 : null,
+      fallbackMs: submitMs + q.medDur * 1000,
+      hours,
+    };
+  }
+  // 队头此刻的「提交时刻」位置：最新出分那条的提交时刻 + 速率 × 它完成至今的钟表时间
+  const r = q.rate;
+  const frontPos = q.front.t + r * (now - q.front.done);
+  // 快赛道（端到端中位 ≤15 分钟）：队列几乎不排队，直接按端到端分布给时间，不必走排队外推
+  if (q.medDur <= 15 * 60) {
+    return {
+      kind: 'fast',
+      q,
+      judgeSec,
+      judgeKnown,
+      frontPos,
+      etaMs: submitMs + q.medDur * 1000,
+      earliest: submitMs + Math.max(5, q.medDur * 0.5) * 1000,
+      latest: submitMs + Math.max(60, q.p90Dur) * 1000,
+    };
+  }
+  if (submitMs <= frontPos) {
+    // 提交时刻已经在队头之前：队列应该已经越过你
+    return { kind: 'overdue', q, judgeSec, judgeKnown, frontPos, etaMs: now, earliest: null, latest: null };
+  }
+  const spread = r >= 2.5 ? 0.5 : 0.3; // 回填速率不稳定，区间放宽
+  return {
+    kind: 'queue',
+    q,
+    judgeSec,
+    judgeKnown,
+    frontPos,
+    etaMs: now + (submitMs - frontPos) / r + judgeMs,
+    earliest: now + (submitMs - frontPos) / (r * (1 + spread)) + judgeMs,
+    latest: now + (submitMs - frontPos) / (r * (1 - spread)) + judgeMs,
+  };
+}
+
+function renderPredict() {
+  const out = $('#predictOut');
+  if (!out || !state.snapshot) return;
+  const sel = $('#predictBoard');
+  const timeInput = $('#predictTime');
+  if (!sel.options.length) return;
+  if (!timeInput.value) {
+    const d = new Date();
+    d.setSeconds(0, 0);
+    timeInput.value = new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+  }
+  const board = boardById(sel.value);
+  const src = $('#predictSource');
+  if (board) {
+    src.hidden = false;
+    src.href = `https://open.oceanbase.com/train/detail/21?questionId=${board.questionId}`;
+  }
+  const submitMs = new Date(timeInput.value).getTime();
+  if (!board || !Number.isFinite(submitMs)) {
+    out.innerHTML = '<p class="pr-note">选一个赛道并填提测时间。</p>';
+    return;
+  }
+  const r = predictEta(board, submitMs);
+  if (r.kind === 'none') {
+    out.innerHTML = '<p class="pr-note">该赛道还没有可用的提交/完成时间戳，无法估算。</p>';
+    return;
+  }
+  const q = r.q;
+  let facts;
+  let head;
+  let note;
+
+  if (r.kind === 'fast') {
+    const past = r.etaMs <= Date.now();
+    facts = [
+      `队头已推进到 ${fmtClock(r.frontPos)}（基本不排队）`,
+      `端到端中位 ${fmtDur(q.medDur)}`,
+      `P90 ${fmtDur(q.p90Dur)}`,
+      `记录数 ${q.n}`,
+    ];
+    head =
+      '<div class="pr-main"><span class="pr-label ok">预计出分</span>' +
+      `<span class="pr-eta">${fmtClock(r.etaMs)}</span>` +
+      `<span class="pr-sub">${past ? '按历史耗时，此刻应该已经有分了' : `提交后约 ${fmtDur(q.medDur)}`} · 通常 ${fmtDur(Math.max(5, q.medDur * 0.5))} – ${fmtDur(Math.max(60, q.p90Dur))} 内出分</span></div>`;
+    note =
+      `这个赛道基本随提随出：端到端中位 <b>${fmtDur(q.medDur)}</b>、P90 <b>${fmtDur(q.p90Dur)}</b>（${q.n} 条记录），` +
+      '排队几乎可以忽略，所以直接用你自己提测时刻加上正常耗时来估。若已经超过这个时间还没出分，八成是提测没成功或代码/环境有问题。';
+  } else if (r.kind === 'overdue') {
+    facts = [
+      `队头提交 ${fmtClock(q.front.t)}`,
+      `队头已推进到 ${fmtClock(r.frontPos)}`,
+      `最新出分 ${fmtClock(q.front.done)}`,
+      `记录数 ${q.n}`,
+    ];
+    head =
+      '<div class="pr-main"><span class="pr-label warn">应该已经出分</span>' +
+      '<span class="pr-eta">早已越过</span>' +
+      '<span class="pr-sub">你的提测时刻早于当前队头，队列已经处理到这里之后了</span></div>';
+    note =
+      `该赛道最新出分的那条提交于 <b>${fmtClock(q.front.t)}</b>（${timeAgo(q.front.done)}完成），按当前速率队头已推进到 <b>${fmtClock(r.frontPos)}</b>，你的 ${fmtClock(submitMs)} 在它之前。` +
+      '如果榜上还没有你的记录，说明这次提交可能没被受理；或者已经出分但分数没变（榜单只保留每人最优记录）。';
+  } else if (r.kind === 'batch') {
+    const winText = r.hours.map((h) => `${String(h).padStart(2, '0')}:00`).join(' / ');
+    facts = [
+      `最近一批出分 ${q.lastBurst ? fmtClock(q.lastBurst.done) : '—'}`,
+      q.lastBurst ? `该批 ${q.lastBurst.n} 条` : '批次未知',
+      `端到端中位 ${fmtDur(q.medDur)}`,
+      `记录数 ${q.n}`,
+    ];
+    head =
+      '<div class="pr-main"><span class="pr-label batch">批量作业 · 下一次出分窗口</span>' +
+      `<span class="pr-eta">${r.etaMs ? fmtClock(r.etaMs) : '—'}</span>` +
+      (r.etaMs
+        ? `<span class="pr-sub">区间 ${fmtClock(r.earliest)} – ${fmtClock(r.latest)}</span>`
+        : '<span class="pr-sub">按历史窗口推算不出</span>') +
+      '</div>' +
+      `<p class="pr-fallback">参考：该赛道历史端到端中位 <b>${fmtDur(q.medDur)}</b>，若按此算约 ${fmtClock(r.fallbackMs)}</p>`;
+    note =
+      `这个赛道近 3 天只出了 <b>${q.n}</b> 条，出分集中在 ${winText} 这几个窗口、中间成片零出分——` +
+      '属于批量/定时触发，不能按推进速率外推。上表取「你提测时刻之后最近的窗口」，仅供参考。';
+  } else {
+    const waitH = (r.etaMs - submitMs) / 3600e3;
+    facts = [
+      `队头已推进到 ${fmtClock(r.frontPos)}`,
+      `当前积压 ${fmtDur((Date.now() - r.frontPos) / 1000)}`,
+      `推进速率 ${q.rate.toFixed(2)}× · ${rateLabelOf(q.rate)}`,
+      `近期平均出分间隔 ${fmtDur(q.win.cadenceSec)}`,
+      r.judgeSec ? `单次评测 ≈ ${fmtDur(r.judgeSec)}${r.judgeKnown ? '' : '（推断）'}` : '单次评测时长未知',
+    ];
+    head =
+      '<div class="pr-main"><span class="pr-label ok">预计出分</span>' +
+      `<span class="pr-eta">${fmtClock(r.etaMs)}</span>` +
+      `<span class="pr-sub">提交后约 ${waitH >= 0.1 ? `${waitH.toFixed(1)} 小时` : `${Math.max(1, Math.round(waitH * 60))} 分钟`} · 区间 ${fmtClock(r.earliest)} – ${fmtClock(r.latest)}</span></div>`;
+    note =
+      `按队列推进推算：队头（最新出分那条）提交于 <b>${fmtClock(q.front.t)}</b>，最近 ${q.win.spanH} 小时内队列的「提交时刻」以 ` +
+      `<b>${q.rate.toFixed(2)}×</b> 的速率随钟表前进（${rateLabelOf(q.rate)}；1.00× = 队头与当前时间同步，系统满负荷），因此此刻队头已推进到 ${fmtClock(r.frontPos)}。` +
+      `你的 ${fmtClock(submitMs)} 还排在队头之后 ${fmtDur((submitMs - r.frontPos) / 1000)} 的提交量里，除以速率即等待时长` +
+      (r.judgeSec ? `，再加单次评测 ≈ ${fmtDur(r.judgeSec)}。` : '（该赛道拿不到空载样本，无法单列评测时长，暂按队列等待计）。') +
+      (q.rate >= 1.25
+        ? '注意：队列正在被快速消化，一旦积压清空，实际出分会早于这个估计。'
+        : q.rate < 0.8
+          ? '注意：队列在变长，实际出分可能晚于这个估计。'
+          : '');
+  }
+  out.innerHTML =
+    head +
+    `<div class="pr-facts">${facts.map((f) => `<span>${escHtml(f)}</span>`).join('')}</div>` +
+    `<p class="pr-note">${note}</p>`;
+}
+
+function fillPredictBoards() {
+  const sel = $('#predictBoard');
+  if (!sel || !state.snapshot) return;
+  const boards = state.snapshot.boards.filter((b) => b.kind === 'track');
+  const keep = sel.value;
+  sel.textContent = '';
+  for (const b of boards) {
+    const o = document.createElement('option');
+    o.value = b.id;
+    o.textContent = b.title;
+    sel.appendChild(o);
+  }
+  if (boards.some((b) => b.id === keep)) sel.value = keep;
+  else if (boards.some((b) => b.id === state.boardId)) sel.value = state.boardId;
+  else if (!sel.value && boards.length) sel.value = boards[0].id;
+}
+
 // ---------------------------------------------------------------- drawer
 
 function openDrawer(board, row) {
@@ -1055,6 +1329,22 @@ $('#onlyChanged').addEventListener('change', (e) => {
 });
 
 $('#boardFilter').addEventListener('input', () => renderSidebar());
+
+// ---- 出分预测面板 ----
+$('#predictBtn').addEventListener('click', () => {
+  const b = boardById($('#predictBoard').value);
+  track('predict', { b: $('#predictBoard').value, t: b?.title || '' });
+  renderPredict();
+});
+$('#predictBoard').addEventListener('change', () => renderPredict());
+$('#predictTime').addEventListener('change', () => renderPredict());
+$('#predictTime').addEventListener('input', () => renderPredict());
+$('#predictNow').addEventListener('click', () => {
+  const d = new Date();
+  d.setSeconds(0, 0);
+  $('#predictTime').value = new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+  renderPredict();
+});
 
 document.querySelectorAll('th.sortable').forEach((th) => {
   th.addEventListener('click', () => {

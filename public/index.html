@@ -71,6 +71,21 @@
     <div id="podium" class="podium"></div>
     <div id="banner" class="banner" hidden></div>
 
+    <section class="predict" id="predictPanel">
+      <div class="predict-head">
+        <h3>出分预测</h3>
+        <p class="meta">填你在某个赛道的提测时间，按当前队列推进速度估算大概什么时候出分</p>
+      </div>
+      <div class="predict-form">
+        <select id="predictBoard" class="select" aria-label="选择赛道"></select>
+        <input id="predictTime" class="input" type="datetime-local" step="60" aria-label="提测时间" />
+        <button id="predictBtn" class="btn btn-primary" type="button">预测出分</button>
+        <button id="predictNow" class="btn-tiny" type="button">用当前时间</button>
+        <a id="predictSource" class="pr-source" href="#" target="_blank" rel="noreferrer" hidden>打开该赛道 ↗</a>
+      </div>
+      <div class="predict-out" id="predictOut"></div>
+    </section>
+
     <section class="timing" id="timingPanel">
       <div class="timing-head">
         <div class="timing-title">

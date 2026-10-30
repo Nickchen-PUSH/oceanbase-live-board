@@ -162,6 +162,7 @@ export class BoardStats {
         boards: stored.boards || {},
         csv: stored.csv || 0,
         out: stored.out || 0,
+        pred: stored.pred || 0,
         refs: stored.refs || {},
         geo: stored.geo || {},
         dev: stored.dev || {},
@@ -228,6 +229,8 @@ export class BoardStats {
       b.csv += 1;
     } else if (kind === 'out') {
       b.out += 1;
+    } else if (kind === 'predict') {
+      b.pred = (b.pred || 0) + 1;
     }
 
     await this.persist(day);
@@ -241,9 +244,9 @@ export class BoardStats {
       const day = dayKey(today - i * 86400000);
       if (!this.days.has(day)) await this.loadDay(day);
       const b = this.days.get(day);
-      out.push({ day, pv: b.pv, uv: b.uv, csv: b.csv, out: b.out });
+      out.push({ day, pv: b.pv, uv: b.uv, csv: b.csv, out: b.out, pred: b.pred || 0 });
     }
-    const totals = { pv: 0, uv: 0, csv: 0, out: 0 };
+    const totals = { pv: 0, uv: 0, csv: 0, out: 0, pred: 0 };
     const merge = { boards: {}, refs: {}, geo: {}, dev: {} };
     for (const day of out) {
       // 汇总区间内的分布（跨天累加）
@@ -251,6 +254,7 @@ export class BoardStats {
       totals.pv += b.pv;
       totals.csv += b.csv;
       totals.out += b.out;
+      totals.pred += b.pred || 0;
       for (const k of Object.keys(merge)) {
         for (const [kk, vv] of Object.entries(b[k] || {})) merge[k][kk] = (merge[k][kk] || 0) + vv;
       }
@@ -418,6 +422,7 @@ footer{color:var(--muted);font-size:12px;text-align:center;padding:0 24px 32px}
     <div class="card hot"><div class="k">榜单切换</div><div class="v" id="boardHits">–</div><div class="s">今日点击次数</div></div>
     <div class="card"><div class="k">CSV 下载</div><div class="v" id="csv">–</div><div class="s">今日</div></div>
     <div class="card"><div class="k">外链点击</div><div class="v" id="out">–</div><div class="s">今日</div></div>
+    <div class="card"><div class="k">出分预测</div><div class="v" id="pred">–</div><div class="s">今日使用次数</div></div>
   </div>
   <section>
     <h2>每日访问量</h2>
@@ -484,6 +489,7 @@ async function load() {
   $('#boardHits').textContent = fmt(Object.values(d.todayBoards || {}).reduce((a, b) => a + b, 0));
   $('#csv').textContent = fmt(d.today.csv);
   $('#out').textContent = fmt(d.today.out);
+  $('#pred').textContent = fmt(d.today.pred || 0);
   $('#pvs').textContent = '近 ' + days + ' 天共 ' + fmt(d.totals.pv) + ' 次';
   chart(d.series);
   rows($('#boards'), d.boards);
