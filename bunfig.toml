@@ -1,0 +1,6 @@
+[serve.static]
+# Bun.serve 的 HTML import（开发 / bun run start）走这个插件编译 Tailwind v4
+plugins = ["bun-plugin-tailwind"]
+
+[test]
+root = "tests"
