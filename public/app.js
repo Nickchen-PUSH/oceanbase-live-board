@@ -1207,7 +1207,11 @@ let promoCache = { key: '', model: null };
 function promotionModel(snap) {
   if (promoCache.key === snap.generatedAt) return promoCache.model;
   const total = snap.boards.find((b) => b.kind === 'total');
-  const tracks = snap.boards.filter((b) => b.kind === 'track' && b.rows.length);
+  // 赛道抓取失败时上游会补一个 rows: [] 的空榜（见 lib/upstream.mjs）。
+  // 这里不能把它悄悄过滤掉当满分算：满分会低估、满分队数虚高、剩余名额偏小。
+  const allTracks = snap.boards.filter((b) => b.kind === 'track');
+  const tracks = allTracks.filter((b) => b.rows.length);
+  const missing = allTracks.filter((b) => !b.rows.length);
   let model = null;
   if (total?.rows.length && tracks.length) {
     const full = new Map(tracks.map((b) => [b.id, Math.max(...b.rows.map((r) => r.score || 0))]));
@@ -1263,6 +1267,8 @@ function promotionModel(snap) {
       fullCount,
       groups: list,
       oneShort: list.reduce((s, g) => s + g.count, 0),
+      // 非空 = 有赛道一条已出分记录都没有，满分口径不完整，调用方应不给数字
+      missing: missing.map((b) => b.title),
     };
   }
   promoCache = { key: snap.generatedAt, model };
@@ -1275,6 +1281,13 @@ function renderPromotion() {
   const m = promotionModel(state.snapshot);
   if (!m) {
     out.innerHTML = '<p class="pr-note">总榜或赛道榜还没有数据，暂时算不出来。</p>';
+    return;
+  }
+  // 有赛道完全没有已出分记录时，满分只能按剩下的赛道推，名额和分组都会算错，先不给数字。
+  if (m.missing.length) {
+    out.innerHTML =
+      `<p class="pr-note warn">${escHtml(m.missing.join('、'))} 还没有已出分记录（通常是上游暂时抓不到），` +
+      '满分口径算不准，晋级名额和分组先不显示。</p>';
     return;
   }
   const cut = state.promoCut;
@@ -1517,7 +1530,9 @@ $('#predictNow').addEventListener('click', () => {
 });
 
 // ---- 晋级形势面板 ----
-$('#promoCut').addEventListener('input', (e) => {
+// #promoCut 是本次新增的元素：HTML 是改动前的、JS 已是新部署的时取不到它，
+// 抛异常会把文件末尾的 bootstrap() 一起挡掉，整个看板不初始化。
+$('#promoCut')?.addEventListener('input', (e) => {
   const v = Math.round(Number(e.target.value));
   if (!Number.isFinite(v) || v < 1) return;
   state.promoCut = v;
