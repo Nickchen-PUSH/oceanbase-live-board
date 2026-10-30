@@ -1,8 +1,8 @@
-name: Build data and deploy to GitHub Pages
+name: Build and deploy to GitHub Pages
 
 # 每 10 分钟重新抓一次上游榜单并重新部署：页面是纯静态的，
 # 浏览器无法直连 openwebapi.oceanbase.com（非 oceanbase Origin 一律 403），
-# 所以抓取只能在 CI 里做。commit 触发的部署用于同步前端改动。
+# 所以抓取只能在 CI 里做。页面优先连 Cloudflare Worker 的实时接口，连不上才用这份快照。
 on:
   push:
     branches: [main]
@@ -28,18 +28,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: '20'
+          bun-version: latest
 
-      - name: Fetch snapshot (camp 21, all boards)
-        run: node scripts/build-data.mjs
+      - run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun test
+
+      - name: Build frontend + fetch snapshot (camp 21, all boards)
+        run: bun run build:pages
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: dist/pages
 
       - id: deployment
         uses: actions/deploy-pages@v4

@@ -1,0 +1,122 @@
+@import 'tailwindcss';
+
+/* 浅色数据看板；暗色跟随系统 prefers-color-scheme（Tailwind 默认 dark: 即媒体查询） */
+@theme {
+  --font-sans: 'Inter', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, monospace;
+  --color-brand-50: #eef5ff;
+  --color-brand-100: #d9e8ff;
+  --color-brand-200: #b6d3ff;
+  --color-brand-300: #84b5ff;
+  --color-brand-400: #4b8eff;
+  --color-brand-500: #1f6fff;
+  --color-brand-600: #0a5ae8;
+  --color-brand-700: #0a47b8;
+  --color-brand-800: #0f3d8f;
+  --color-brand-900: #122f66;
+  --color-gold: #d99a06;
+  --color-silver: #8a94a6;
+  --color-bronze: #b8692f;
+}
+
+@layer base {
+  :root {
+    /* 省份瓦片地图的底色（0 队时的颜色），颜色强度在其上 color-mix */
+    --tile-base: #eef2f8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --tile-base: #1a2130;
+    }
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+    scrollbar-gutter: stable;
+  }
+  body {
+    @apply bg-slate-100/70 text-slate-800 antialiased dark:bg-[#0b0f17] dark:text-slate-200;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-brand-500;
+  }
+  ::selection {
+    @apply bg-brand-200 text-brand-900;
+  }
+  dialog::backdrop {
+    background: rgb(15 23 42 / 0.35);
+    backdrop-filter: blur(2px);
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgb(15_23_42/0.04)] dark:border-slate-800 dark:bg-slate-900/70;
+  }
+  .card-title {
+    @apply flex items-center gap-2 text-[13px] font-semibold tracking-wide text-slate-500 dark:text-slate-400;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1 text-[13px] text-slate-600 transition-colors hover:border-brand-300 hover:text-brand-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-brand-500 dark:hover:text-brand-300;
+  }
+  .chip[aria-pressed='true'],
+  .chip[aria-current='page'] {
+    @apply border-brand-500 bg-brand-500 text-white hover:text-white dark:border-brand-500 dark:bg-brand-600 dark:text-white;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800;
+  }
+  .btn-primary {
+    @apply border-brand-600 bg-brand-600 text-white hover:bg-brand-700 dark:border-brand-600 dark:bg-brand-600 dark:hover:bg-brand-500;
+  }
+  .input {
+    @apply rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[13px] text-slate-800 placeholder:text-slate-400 focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-500/20 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100;
+  }
+  .tab {
+    @apply relative px-1 pb-2.5 pt-1 text-sm font-medium text-slate-500 transition-colors hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100;
+  }
+  .tab[aria-selected='true'] {
+    @apply text-brand-600 after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:rounded-full after:bg-brand-500 dark:text-brand-300;
+  }
+  .badge {
+    @apply inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium leading-none;
+  }
+  /* 长表格：浏览器原生跳过屏幕外行的渲染，代替虚拟滚动 */
+  .cv-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 44px;
+  }
+}
+
+@keyframes flash {
+  from {
+    background-color: rgb(250 204 21 / 0.28);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+.flash {
+  animation: flash 2.4s ease-out;
+}
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.pulse-dot {
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash,
+  .pulse-dot {
+    animation: none;
+  }
+}

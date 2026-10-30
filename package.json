@@ -1,14 +1,40 @@
 {
   "name": "oceanbase-live-board",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Real-time leaderboard dashboard for OceanBase 训练营 tracks + 数据库大赛总榜 (camp 21)",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs",
-    "dev": "node --watch server.mjs"
+    "dev": "bun --hot src/server/bun.ts",
+    "start": "NODE_ENV=production bun src/server/bun.ts",
+    "build": "bun scripts/build.ts",
+    "build:pages": "bun scripts/build-pages.ts",
+    "backtest": "bun scripts/backtest.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "worker:dev": "bun run build && wrangler dev",
+    "worker:deploy": "bun run build && wrangler deploy"
   },
   "engines": {
-    "node": ">=20"
+    "bun": ">=1.2"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.105.0",
+    "@tanstack/react-router": "^1.170.46",
+    "@tanstack/react-table": "^8",
+    "hono": "^4.13.14",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261030.1",
+    "@types/bun": "^1.4.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "bun-plugin-tailwind": "^0.1.2",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.156.0"
   }
 }

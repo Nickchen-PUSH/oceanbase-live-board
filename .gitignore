@@ -1,5 +1,8 @@
 node_modules/
 dist/
+.cache/
+.wrangler/
 .DS_Store
 *.log
 .stats-key
+.dev.vars

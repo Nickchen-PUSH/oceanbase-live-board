@@ -1,12 +1,15 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "oceanbase-live-board",
-  "main": "worker/index.js",
+  "main": "src/worker/index.ts",
   "compatibility_date": "2026-01-01",
   "observability": { "enabled": true },
   "assets": {
-    "directory": "./public",
+    // 先 `bun run build` 产出 dist/client
+    "directory": "./dist/client",
     "binding": "ASSETS",
+    // 前端是 SPA：/stats 等页面路由回 index.html
+    "not_found_handling": "single-page-application",
     // 只有 /api/* 进 Worker，静态文件直接由边缘资源服务
     "run_worker_first": ["/api/*"]
   },
@@ -20,8 +23,9 @@
     { "tag": "v1", "new_sqlite_classes": ["BoardHub"] },
     { "tag": "v2", "new_sqlite_classes": ["BoardStats"] }
   ],
-  "routes": [{ "pattern": "board.fireflydle.games", "custom_domain": true }],
+  "routes": [{ "pattern": "board.nerv-base.com", "custom_domain": true }],
   "vars": {
     "CAMP_ID": "21"
   }
+  // 访问统计后台：wrangler secret put STATS_KEY
 }
